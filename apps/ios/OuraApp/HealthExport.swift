@@ -51,6 +51,7 @@ final class HealthExport: ObservableObject {
         if let t = HKObjectType.quantityType(forIdentifier: .respiratoryRate) { types.insert(t) }
         if let t = HKObjectType.quantityType(forIdentifier: .basalEnergyBurned) { types.insert(t) }
         if let t = HKObjectType.quantityType(forIdentifier: .vo2Max) { types.insert(t) }
+        if let t = HKObjectType.quantityType(forIdentifier: .heartRateVariabilitySDNN) { types.insert(t) }
         return types
     }
 
@@ -289,8 +290,7 @@ final class HealthExport: ObservableObject {
         let query = HKSampleQuery(sampleType: type, predicate: pred, limit: HKObjectQueryNoLimit,
                                   sortDescriptors: nil) { _, samples, error in
             let ours: [HKObject] = samples ?? []
-            completion(type.identifier == HKQuantityTypeIdentifier.heartRateVariabilitySDNN.rawValue
-                ? Self.legacyHRVSamples(ours) : ours, error)
+            completion(ours, error)
         }
         store.execute(query)
     }
@@ -455,6 +455,34 @@ final class HealthExport: ObservableObject {
             let q = HKQuantity(unit: .secondUnit(with: .milli), doubleValue: hrv)
             out.append(HKQuantitySample(type: type, quantity: q, start: end, end: end,
                                         metadata: meta("hrv.rmssd.\(key).\(Int(hrv.rounded()))")))
+        }
+        // Health's "Heart Rate Variability" chart, and apps reading HRV from Health
+        // (Bevel among them), only see the SDNN type. The ring measures RMSSD; the
+        // official Oura app files it under HRV all the same, so do what readers
+        // expect: the in-sleep series at about 5-minute steps (as Oura writes it),
+        // tagged with the real method. The nightly figure also goes to RMSSD above.
+        if let type = HKObjectType.quantityType(forIdentifier: .heartRateVariabilitySDNN), canShare(type) {
+            let unit = HKUnit.secondUnit(with: .milli)
+            let method: [String: Any] = ["OpenOuraHRVMethod": "RMSSD"]
+            if let series = night.series?.hrv, series.count > 1 {
+                let span = end.timeIntervalSince(start)
+                let step = max(1, series.count / max(1, Int(span / 300)))
+                var i = 0
+                while i < series.count {
+                    let ms = series[i]
+                    if ms.isFinite, ms > 3, ms < 300 {
+                        let t = start.addingTimeInterval(span * Double(i) / Double(series.count - 1))
+                        out.append(HKQuantitySample(type: type, quantity: HKQuantity(unit: unit, doubleValue: ms),
+                                                    start: t, end: t,
+                                                    metadata: meta("hrvs.\(key).\(i).\(Int(ms.rounded()))").merging(method) { a, _ in a }))
+                    }
+                    i += step
+                }
+            } else if let hrv = night.hrv_ms, hrv.isFinite, hrv > 0 {
+                out.append(HKQuantitySample(type: type, quantity: HKQuantity(unit: unit, doubleValue: hrv),
+                                            start: end, end: end,
+                                            metadata: meta("hrvs.\(key).night.\(Int(hrv.rounded()))").merging(method) { a, _ in a }))
+            }
         }
         if let type = HKObjectType.quantityType(forIdentifier: .restingHeartRate),
            canShare(type), let rhr = night.rhr, rhr > 0 {

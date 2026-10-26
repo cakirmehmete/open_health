@@ -4,13 +4,16 @@ import XCTest
 
 /// Constructs samples only: no HealthKit permissions, queries, saves or deletes.
 final class HealthExportTests: XCTestCase {
-    func testRingRmssdIsNeverExportedAsSdnn() {
+    func testRingHrvReachesBothHrvTypes() {
         var night = NightRow(ymd: "2026-10-10", start_ds: 100, start: "23:00", end: "07:00")
         night.hrv_ms = 72
         night.rhr = 50
         let samples = HealthExport.heartSamples(night, canShare: { _ in true })
             .compactMap { $0 as? HKQuantitySample }
-        XCTAssertFalse(samples.contains { $0.quantityType.identifier == HKQuantityTypeIdentifier.heartRateVariabilitySDNN.rawValue })
+        // Readers of Health's HRV chart only see the SDNN type, so the ring's RMSSD
+        // goes there too (as the official app does), tagged with its real method.
+        let sdnn = samples.first { $0.quantityType.identifier == HKQuantityTypeIdentifier.heartRateVariabilitySDNN.rawValue }
+        XCTAssertEqual(sdnn?.metadata?["OpenOuraHRVMethod"] as? String, "RMSSD")
         XCTAssertTrue(samples.contains { $0.quantityType.identifier == HKQuantityTypeIdentifier.restingHeartRate.rawValue })
         let hrv = samples.first { ($0.metadata?[HKMetadataKeySyncIdentifier] as? String)?.hasPrefix("openoura.hrv.") == true }
         if let expectedType = HealthExport.ringHRVType {
@@ -23,11 +26,9 @@ final class HealthExportTests: XCTestCase {
         XCTAssertTrue(HealthExport.heartSamples(night, canShare: { _ in false }).isEmpty)
     }
 
-    func testAuthorizationNeverRequestsSdnn() throws {
+    func testAuthorizationRequestsBothHrvTypes() throws {
         let sdnn = try XCTUnwrap(HKObjectType.quantityType(forIdentifier: .heartRateVariabilitySDNN))
-        XCTAssertFalse(HealthExport.shareTypes.contains(sdnn))
-        XCTAssertFalse(HealthExport.reconciliationTypes(canShare: { _ in false }).contains(sdnn))
-        XCTAssertTrue(HealthExport.reconciliationTypes(canShare: { $0 == sdnn }).contains(sdnn))
+        XCTAssertTrue(HealthExport.shareTypes.contains(sdnn))
         if let rmssd = HealthExport.ringHRVType { XCTAssertTrue(HealthExport.shareTypes.contains(rmssd)) }
     }
 
