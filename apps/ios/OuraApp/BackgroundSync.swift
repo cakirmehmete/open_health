@@ -23,6 +23,7 @@ enum BackgroundSync {
     /// Event-driven wakes closer than this to the last good sync are ignored: each
     /// sync costs ring battery, and a few minutes of data isn't worth it.
     static let minimumGap: TimeInterval = 15 * 60
+    private static let lastWakeKey = "bg.last-wake-at"
 
     /// Registration must finish before the app finishes launching.
     static func register() {
@@ -52,16 +53,26 @@ enum BackgroundSync {
     /// the ~30 s of background time iOS grants; Bluetooth traffic during the drain
     /// keeps the app awake past that under the bluetooth-central mode.
     static func wake(reason: String, completion: (() -> Void)? = nil) {
-        let recent = RingSync.shared.lastSuccessfulSyncAt.map { Date().timeIntervalSince($0) < minimumGap } ?? false
+        // Gate on the last *attempt*, not the last success: a failing sync must not
+        // retry on every wake. Our own Health step writes fire the step observer, and
+        // each aborted sync drops the link, which the watcher reconnects (another
+        // wake), so gating on success alone looped about once a minute.
+        let now = Date()
+        let lastAttempt = UserDefaults.standard.object(forKey: lastWakeKey) as? Date
+        let recent = [RingSync.shared.lastSuccessfulSyncAt, lastAttempt]
+            .compactMap { $0 }.contains { now.timeIntervalSince($0) < minimumGap }
         guard UIApplication.shared.applicationState != .active, !recent,
               !WorkCoordinator.shared.backgroundSession else {
             completion?()
             return
         }
+        UserDefaults.standard.set(now, forKey: lastWakeKey)
+        // When this ~30 s grant runs out, do NOT pause the sync: the bluetooth-central
+        // background mode keeps the app running while ring traffic flows. Pausing here
+        // cut every connect-triggered sync off before the drain began.
         var task = UIBackgroundTaskIdentifier.invalid
         task = UIApplication.shared.beginBackgroundTask(withName: "ring-wake") {
-            RingSync.shared.pause()
-            WorkCoordinator.shared.invalidateAnalysis()
+            dlog("bg", "\(reason) background grant ended; leaving the drain to Bluetooth")
             UIApplication.shared.endBackgroundTask(task)
             task = .invalid
         }

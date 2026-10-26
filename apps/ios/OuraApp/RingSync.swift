@@ -320,7 +320,15 @@ final class SyncProgressBridge: SyncProgressListener, @unchecked Sendable {
 final class RingSync: ObservableObject {
     static let shared = RingSync()
     @Published var status: String = ""
-    @Published var busy = false
+    @Published var busy = false {
+        // A ring operation adopted into the background releases it when it ends.
+        didSet {
+            if !busy, adoptedIntoBackground {
+                adoptedIntoBackground = false
+                WorkCoordinator.shared.backgroundSession = false
+            }
+        }
+    }
     @Published private(set) var exportStatus: String?
     @Published var connectionIssue: String?
     @Published var lastReport: SyncReport?
@@ -352,6 +360,9 @@ final class RingSync: ObservableObject {
     private var progressLogAt = 0.0
     private var progressStage = ""
     private var lifecycleObservers: [NSObjectProtocol] = []
+    /// A foreground sync that kept running after the app left the screen; it owns
+    /// `WorkCoordinator.backgroundSession` until it ends.
+    private var adoptedIntoBackground = false
 
     func pause() {
         paused = true
@@ -374,8 +385,13 @@ final class RingSync: ObservableObject {
             lifecycleObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in
                     guard let self, self.busy, !WorkCoordinator.shared.backgroundSession else { return }
+                    // Leaving the app mid-sync used to pause it. The bluetooth-central
+                    // mode keeps a draining ring link alive in the background (the DB
+                    // and key stay readable after first unlock), so let it finish.
                     WorkCoordinator.shared.beginCleanup()
-                    self.pause()
+                    WorkCoordinator.shared.backgroundSession = true
+                    self.adoptedIntoBackground = true
+                    dlog("sync", "app left the foreground mid-sync; continuing in the background")
                 }
             })
         }
