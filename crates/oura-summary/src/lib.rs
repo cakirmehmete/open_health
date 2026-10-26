@@ -2135,13 +2135,20 @@ pub fn build_summary(
                 if let (Some(s), Some(e)) =
                     (v["bedtime_start_ds"].as_i64(), v["bedtime_end_ds"].as_i64())
                 {
+                    // The ring re-emits a growing bedtime on every sync while you
+                    // sleep, and may nudge its start by a few deciseconds between
+                    // snapshots. Fold snapshots that start within 5 minutes of each
+                    // other (wall clock, so other boots stay apart) into one night;
+                    // separate nights would split the night's signals between them.
                     match raw_beds.iter_mut().find(|bed| {
-                        bed.start_ds == s
-                            && (unix_s_at(bed.start_ds, bed.captured_unix) - unix_s_at(s, *cu))
-                                .abs()
-                                <= 5.0 * 60.0
+                        (unix_s_at(bed.start_ds, bed.captured_unix) - unix_s_at(s, *cu)).abs()
+                            <= 5.0 * 60.0
                     }) {
                         Some(bed) => {
+                            if *cu >= bed.captured_unix {
+                                bed.start_ds = s;
+                                bed.raw_start_ds = s;
+                            }
                             bed.end_ds = bed.end_ds.max(e);
                             bed.raw_end_ds = bed.raw_end_ds.max(e);
                             bed.captured_unix = bed.captured_unix.max(*cu);
@@ -4033,6 +4040,62 @@ mod tests {
         assert!(stages.contains(&1));
         assert!(stages.contains(&2));
         assert!(stages.contains(&4));
+    }
+
+    #[test]
+    fn growing_bedtime_snapshots_fold_into_one_night_with_all_its_signals() {
+        let dir = std::env::temp_dir().join(format!(
+            "oura-bedtime-snapshots-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("oura.db");
+        drop(Store::open(&db).unwrap());
+
+        let base_unix = 1_780_000_000i64;
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+             VALUES ('S1', 66, 'time_sync', 1000, X'00000000', ?1, ?2)",
+            rusqlite::params![format!("{{\"unix_time\":{base_unix}}}"), base_unix],
+        )
+        .unwrap();
+        // One sleep, synced three times as it grows; the ring moved its start by 0.4 s
+        // after the first snapshot (seen on Ring 5 firmware 2.1.25).
+        for (start, end, captured) in [(10_000i64, 150_000i64, 15_000i64), (10_004, 180_000, 18_000), (10_004, 220_000, 22_000)] {
+            conn.execute(
+                "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+                 VALUES ('S1', 118, 'bedtime_period', ?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    end,
+                    end.to_le_bytes().to_vec(),
+                    format!("{{\"bedtime_start_ds\":{start},\"bedtime_end_ds\":{end}}}"),
+                    base_unix + captured,
+                ],
+            )
+            .unwrap();
+        }
+        // HR recorded early in the night, synced with the first snapshot.
+        conn.execute(
+            "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+             VALUES ('S1', 93, 'hrv_event', 60000, X'01', '{\"hr_bpm\":[50,49,50,50,48],\"interval_min\":5,\"rmssd_ms\":[58,53,58,65,101]}', ?1)",
+            rusqlite::params![base_unix + 15_000],
+        )
+        .unwrap();
+        drop(conn);
+
+        let sum = build_summary(&db, 0.0, &NoModelRunner).unwrap();
+        let nights = sum["nights"].as_array().unwrap();
+        assert_eq!(nights.len(), 1, "one sleep must not become several nights: {nights:?}");
+        assert_eq!(nights[0]["start_ds"], 10_004);
+        assert_eq!(nights[0]["end_ds"], 220_000);
+        assert_eq!(nights[0]["series_t"]["hr"].as_array().unwrap().len(), 5);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
