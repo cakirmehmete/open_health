@@ -595,7 +595,8 @@ function openActDetail(s) {
       <div class="ad-grid">
         ${kv("Time", `${hhmm(s.start)}–${s.end}`)}
         ${kv("Duration", `${s.duration_min} min`)}
-        ${s.active_kcal != null ? kv("Active calories", `${Math.round(s.active_kcal).toLocaleString()} kcal`) : ""}
+        ${s.kcal != null ? kv("Calories (Oura model)", `${Math.round(s.kcal).toLocaleString()} kcal`) : ""}
+        ${s.active_kcal != null ? kv(s.kcal != null ? "Calories (MET estimate)" : "Active calories", `${Math.round(s.active_kcal).toLocaleString()} kcal`) : ""}
         ${kv("Confidence", conf)}
         ${kv("Workout", work ? "yes" : "no")}
       </div>

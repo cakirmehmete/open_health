@@ -62,7 +62,7 @@ mkdir -p "$APP/Frameworks"
 cp "$LT/lib/libtorch.dylib" "$LT/lib/libtorch_cpu.dylib" \
    "$LT/lib/libc10.dylib" "$LT/lib/libtorch_global_deps.dylib" "$APP/Frameworks/"
 # every exported version of the families the app runs (ModelFiles.swift picks one)
-for f in "$REPO"/notes/models/mobile/{sleepstaging_,automatic_activity_detection_,steps_motion_decoder_,cva_[0-9],illness_detection_,sleepnet_bdi_}*; do
+for f in "$REPO"/notes/models/mobile/{sleepstaging_,automatic_activity_detection_,steps_motion_decoder_,cva_[0-9],illness_detection_,sleepnet_bdi_,energy_expenditure_}*; do
     [ -f "$f" ] && cp "$f" "$APP/"
 done
 # the store runs in WAL mode; fold any -wal pages back in so the single-file copy

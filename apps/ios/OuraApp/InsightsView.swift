@@ -266,7 +266,8 @@ struct InsightsView: View {
                         HStack {
                             Text(w.label.capitalized)
                             Spacer()
-                            Text("\(w.start) · \(w.durationMin) min").foregroundStyle(Ink.dim)
+                            Text("\(w.start) · \(w.durationMin) min" + (w.kcal.map { " · \(Int($0.rounded())) kcal" } ?? ""))
+                                .foregroundStyle(Ink.dim)
                         }
                         .font(.caption)
                     }

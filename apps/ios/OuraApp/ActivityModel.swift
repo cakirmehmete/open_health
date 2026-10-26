@@ -50,7 +50,10 @@ enum ActivityModel {
     /// changes, so cached results — cached failures above all — are recomputed once
     /// instead of being trusted for inputs the new pipeline would build differently.
     private static let pipelineVersion = 2
-    private static var modelName: String? { ModelFiles.find("automatic_activity_detection")?.name }
+    /// Keys the cache on both files: a newly bundled energy model recomputes calories.
+    private static var modelName: String? {
+        ModelFiles.find("automatic_activity_detection").map { "\($0.name)|\(ModelFiles.find("energy_expenditure")?.name ?? "-")" }
+    }
 
     /// The last complete pass's result when the store is unchanged since (same rows,
     /// same clock anchors) — no event read needed. `storeDigest` is `Events.digest()`.
@@ -146,6 +149,10 @@ enum ActivityModel {
             calendar.startOfDay(for: Date(timeIntervalSince1970: $0.unixMinute * 60))
         }).sorted(by: >)
 
+        let energy = ModelFiles.find("energy_expenditure").map { model in
+            (path: model.path, demo: [profile?.sex?.uppercased() == "F" ? Float(-1) : 1, Float(profile?.height_m ?? 1.78),
+                                      Float(profile?.age ?? 30), Float(profile?.weight_kg ?? 75), Float(profile?.ring_size ?? 10)])
+        }
         let sex: Float = profile?.sex?.uppercased() == "M" ? 1 : 0
         let user: [Float] = [Float(profile?.age ?? 30), sex, Float(profile?.height_m ?? 1.78),
                              Float(profile?.weight_kg ?? 75)] + Array(repeating: nan, count: 10)
@@ -254,7 +261,7 @@ enum ActivityModel {
             if isDegenerate(day.inputs) {
                 dlog("models", "activity day=\(day.key) met=\(day.inputs.met.count) motion=\(day.inputs.motion.count) hr=\(day.inputs.hr.count): no valid wear window for the model, no sessions")
             } else {
-                do { daySessions = try runDay(day.inputs, user: user, aadPath: aadPath, nan: nan, inputsSink: inputsSink) }
+                do { daySessions = try runDay(day.inputs, user: user, aadPath: aadPath, nan: nan, energy: energy, inputsSink: inputsSink) }
                 catch {
                     guard !AnalysisRun.cancelled else {
                         if recomputed > 0 { ModelCacheStore.save(cacheFile, globalKey: globalKey, entries: cache, keepGenerations: true) }
@@ -334,6 +341,7 @@ enum ActivityModel {
 
     /// One AAD inference over one local day's inputs.
     private static func runDay(_ inputs: DayInputs, user: [Float], aadPath: String, nan: Float,
+                               energy: (path: String, demo: [Float])? = nil,
                                inputsSink: (([String: Any]) -> Void)? = nil) throws -> [WorkoutSession] {
         let decoded = try decodeStepPackets(inputs.rawStep)
         let lo = inputs.dayStart.timeIntervalSince1970 / 60
@@ -368,13 +376,73 @@ enum ActivityModel {
             let values = Array(output[row * 9..<row * 9 + 9])
             let start = inputs.dayStart.addingTimeInterval(Double(values[0]) * 60)
             let end = inputs.dayStart.addingTimeInterval(Double(values[1]) * 60)
-            sessions.append(WorkoutSession(
+            var session = WorkoutSession(
                 start: stamp.string(from: start), end: time.string(from: end),
                 durationMin: Int((values[1] - values[0]).rounded()),
                 label: behavior[Int(values[3])] ?? "activity", isWorkout: Double(values[2])
-            ))
+            )
+            if let energy, values[2] >= 0.5, values[1] - values[0] >= 10 {
+                session.kcal = workoutEnergy(inputs, steps: stepRows, activityId: values[3],
+                                             fromMinute: lo + Double(values[0]), toMinute: lo + Double(values[1]),
+                                             modelPath: energy.path, demo: energy.demo)
+            }
+            sessions.append(session)
         }
         return sessions
+    }
+
+    /// Oura's per-workout energy model over one detected workout, from the same day
+    /// inputs AAD read (twin of tools/run_energy_model.py). Returns active kcal, or nil.
+    private static func workoutEnergy(_ inputs: DayInputs, steps: [TimedRow], activityId: Float,
+                                      fromMinute: Double, toMinute: Double,
+                                      modelPath: String, demo: [Float]) -> Double? {
+        let lo = inputs.dayStart.timeIntervalSince1970 / 60
+        /// Rows of a day matrix (col 0 = minutes since local midnight) inside the workout,
+        /// as epoch-ms stamps and the remaining columns (NaN rows dropped).
+        func slice(_ flat: [Float], columns: Int, keep: Int) -> (ts: [Int64], values: [Float]) {
+            var ts: [Int64] = [], values: [Float] = []
+            for row in 0..<(flat.count / columns) {
+                let minute = lo + Double(flat[row * columns])
+                let rest = Array(flat[row * columns + 1..<row * columns + 1 + keep])
+                guard minute >= fromMinute, minute <= toMinute, !rest.contains(where: \.isNaN) else { continue }
+                ts.append(Int64((minute * 60_000).rounded())); values.append(contentsOf: rest)
+            }
+            return (ts, values)
+        }
+        var met = slice(inputs.met.flat, columns: 2, keep: 1)
+        // motion column 5 (regular_motion) is NaN in what the ring sends; EE reads it as 0.
+        var motion: (ts: [Int64], values: [Float]) = ([], [])
+        for row in 0..<inputs.motion.count {
+            let base = row * 9, minute = lo + Double(inputs.motion.flat[base])
+            var rest = Array(inputs.motion.flat[base + 1..<base + 9])
+            guard minute >= fromMinute, minute <= toMinute else { continue }
+            rest[5] = rest[5].isNaN ? 0 : rest[5]
+            guard !rest.contains(where: \.isNaN) else { continue }
+            motion.ts.append(Int64((minute * 60_000).rounded())); motion.values.append(contentsOf: rest)
+        }
+        var step: (ts: [Int64], values: [Float]) = ([], [])
+        for row in steps where row.unixMinute >= fromMinute && row.unixMinute <= toMinute
+            && !row.values.contains(where: \.isNaN) {
+            step.ts.append(Int64((row.unixMinute * 60_000).rounded())); step.values.append(contentsOf: row.values)
+        }
+        var hr = slice(inputs.hr.flat, columns: 2, keep: 1)
+        var hrPairs = hr.values.flatMap { [$0, 0] }
+        var temp = slice(inputs.temp.flat, columns: 2, keep: 1)
+        var demoV = demo
+        var details: [Float] = [activityId, -1]
+        var out = [Double](repeating: .nan, count: 5)
+        let status = oura_energy(modelPath, &demoV, &details,
+                                 Int64((fromMinute * 60_000).rounded()), Int64((toMinute * 60_000).rounded()),
+                                 &met.ts, &met.values, Int32(met.ts.count),
+                                 &motion.ts, &motion.values, Int32(motion.ts.count),
+                                 &step.ts, &step.values, Int32(step.ts.count),
+                                 &hr.ts, &hrPairs, Int32(hr.ts.count),
+                                 &temp.ts, &temp.values, Int32(temp.ts.count), &out)
+        guard status == 0, out[0].isFinite, out[0] >= 0 else {
+            dlog("models", "energy workout id=\(Int(activityId)) failed (status \(status))")
+            return nil
+        }
+        return (out[0] * 10).rounded() / 10
     }
 
     private static func collectStepPackets(events: EventStore.Events, clock: EventStore.RingClock) -> [TimedRow] {

@@ -125,6 +125,7 @@ targets:
           - "cva_[0-9]*.ptl"
           - "illness_detection_*.ptl"
           - "sleepnet_bdi_*.ptl"
+          - "energy_expenditure_*.ptl"
         buildPhase: resources
       - path: ../../../oura.db
         buildPhase: resources

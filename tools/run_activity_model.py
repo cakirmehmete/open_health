@@ -8,6 +8,7 @@ are essential: omitting or misordering gait can turn a hike into cycling.
 import argparse
 import datetime
 import json
+import math
 import os
 import sqlite3
 import sys
@@ -27,6 +28,8 @@ REPO = Path(__file__).resolve().parent.parent
 MODEL = resolve_model(REPO, "automatic_activity_detection", "3_1_11", oldest="3_1_0", newest="3_1_12")
 STEP_MODEL = resolve_model(REPO, "steps_motion_decoder", "2_0_0", newest="2_999_0")
 MODEL_VERSION = model_version(MODEL, "automatic_activity_detection")
+# Oura's per-workout calorie model; optional (sessions carry "kcal": null without it).
+ENERGY_MODEL = resolve_model(REPO, "energy_expenditure", "2_4_1", oldest="2_4_0", newest="2_4_999")
 
 BEHAVIOR = {
     -1: "nothing", 0: "<empty>", 1: "badminton", 2: "boxing", 3: "crossCountrySkiing",
@@ -171,6 +174,51 @@ def decode_stepmotion(db, unix_seconds, enabled, epochs):
                   for ts, values in zip(out_ts.flatten().tolist(), out_data.tolist()))
 
 
+_energy = None
+
+
+def workout_kcal(start_min, end_min, activity_id, rows, args):
+    """Active kcal for one workout from energy_expenditure (iOS twin:
+    ActivityModel.workoutEnergy). `rows` maps stream -> [[abs_minute, *values]]; NaN
+    rows are dropped and motion's NaN regular_motion column is read as 0."""
+    global _energy
+    if not ENERGY_MODEL.exists() or end_min - start_min < 10:
+        return None
+    if _energy is None:
+        _energy = torch.jit.load(str(ENERGY_MODEL), map_location="cpu").eval()
+
+    def part(name, keep):
+        ts, vals = [], []
+        for row in rows[name]:
+            values = list(row[1:1 + keep])
+            if name == "motion" and math.isnan(values[5]):
+                values[5] = 0.0
+            if start_min <= row[0] <= end_min and not any(math.isnan(v) for v in values):
+                ts.append([round(row[0] * 60_000)]); vals.append(values)
+        return (torch.tensor(vals, dtype=torch.float32).reshape(-1, keep),
+                torch.tensor(ts, dtype=torch.int64).reshape(-1, 1))
+    met, met_t = part("met", 1)
+    motion, motion_t = part("motion", 8)
+    step, step_t = part("step", 11)
+    hr, hr_t = part("heart_rate", 1)
+    hr = torch.cat([hr, torch.zeros_like(hr)], dim=1)
+    temp, temp_t = part("temperature", 1)
+    try:
+        with torch.no_grad():
+            out = _energy(torch.tensor(args.energy_demo, dtype=torch.float32),
+                          torch.tensor([float(activity_id), -1.0]),
+                          torch.tensor([round(start_min * 60_000), round(end_min * 60_000)], dtype=torch.int64),
+                          met, met_t, motion, motion_t, step, step_t, hr, hr_t, temp, temp_t,
+                          torch.full((15,), float("nan")),
+                          torch.zeros((0, 5)), torch.zeros((0, 1), dtype=torch.int64))
+    except (torch.jit.Error, RuntimeError) as error:
+        if args.verbose:
+            print(f"energy model rejected workout ({error})", file=sys.stderr)
+        return None
+    kcal = float(out[0].flatten()[0])
+    return round(kcal, 1) if math.isfinite(kcal) and kcal >= 0 else None
+
+
 def run_day(model, day, day_start_min, signals, steps, args):
     day_end_min = day_start_min + 24 * 60
 
@@ -207,10 +255,16 @@ def run_day(model, day, day_start_min, signals, steps, args):
         end = local_midnight + datetime.timedelta(minutes=row[1])
         top = [(BEHAVIOR.get(int(row[3 + 2 * i]), str(int(row[3 + 2 * i]))),
                 round(row[4 + 2 * i], 3)) for i in range(3)]
+        absolute = lambda rows_: [[day_start_min + r[0]] + list(r[1:]) for r in rows_]
+        kcal = workout_kcal(day_start_min + row[0], day_start_min + row[1], row[3], {
+            "met": absolute(met), "motion": absolute(motion), "step": absolute(step_rows),
+            "heart_rate": absolute(heart_rate), "temperature": absolute(temperature),
+        }, args) if row[2] >= args.threshold else None
         sessions.append({
             "start": start.strftime("%Y-%m-%d %H:%M"), "end": end.strftime("%H:%M"),
             "duration_min": round(row[1] - row[0]), "is_workout": round(row[2], 3),
             "label": top[0][0], "label_confidence": top[0][1], "top3": top,
+            "kcal": kcal,
         })
     return sessions
 
@@ -269,6 +323,9 @@ def main():
         pass
     args.user_vector = [float(profile.get("age") or 30), 1.0 if str(profile.get("sex", "M")).upper() == "M" else 0.0,
                         float(profile.get("height_m") or 1.78), float(profile.get("weight_kg") or 75)]
+    args.energy_demo = [-1.0 if str(profile.get("sex", "M")).upper() == "F" else 1.0,
+                        float(profile.get("height_m") or 1.78), float(profile.get("age") or 30),
+                        float(profile.get("weight_kg") or 75), float(profile.get("ring_size") or 10)]
     offset_minutes = args.tz * 60
     dates = sorted({datetime.datetime.utcfromtimestamp(t * 60 + args.tz * 3600).date()
                     for t, _ in signals["met"]})

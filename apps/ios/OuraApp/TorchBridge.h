@@ -69,6 +69,20 @@ int oura_illness(const char *model_path, const float *series, const float *scala
 int oura_bdi(const char *model_path, int64_t bedtime_start_ms, int64_t bedtime_end_ms,
              const int64_t *ibi_ts, const float *ibi_val, int n_ibi,
              float *out_metrics, int *out_epochs, int *out_flagged_sleep);
+// Workout energy (energy_expenditure_2_4_1), mirroring tools/run_energy_model.py.
+// demo[5] = [sex(+1 M / -1 F), height_m, age, weight_kg, ring_size]; details[2] =
+// [activity_id (AAD behavior id), intensity (-1 unknown)]; each stream is n rows of
+// epoch-ms `*_ts` with values met[1], motion[8], step[11] (decoded stepmotion), hr[2]
+// (bpm, unused), temp[1]; any stream may be empty. Writes out[5] = [active_kcal,
+// average_met, intensity 0-2, table_kcal, mode 1-4]. Returns 0 / -1.
+int oura_energy(const char *model_path, const float *demo, const float *details,
+                int64_t start_ms, int64_t end_ms,
+                const int64_t *met_ts, const float *met, int n_met,
+                const int64_t *motion_ts, const float *motion, int n_motion,
+                const int64_t *step_ts, const float *step, int n_step,
+                const int64_t *hr_ts, const float *hr, int n_hr,
+                const int64_t *temp_ts, const float *temp, int n_temp,
+                double *out);
 // Free every loaded model module (they reload on next use). Waits for a running
 // inference to finish, so call it off the main thread.
 void oura_torch_release(void);

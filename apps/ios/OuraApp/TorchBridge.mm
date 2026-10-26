@@ -30,11 +30,11 @@ struct ModuleSlot {
     std::unique_ptr<torch::jit::mobile::Module> module;
     std::string path;
 };
-static ModuleSlot g_sleepnet, g_cva, g_activity, g_stepmotion, g_illness, g_bdi;
+static ModuleSlot g_sleepnet, g_cva, g_activity, g_stepmotion, g_illness, g_bdi, g_energy;
 
 void oura_torch_release(void) {
     std::lock_guard<std::mutex> lock(g_torch);
-    for (ModuleSlot *slot : {&g_sleepnet, &g_cva, &g_activity, &g_stepmotion, &g_illness, &g_bdi}) {
+    for (ModuleSlot *slot : {&g_sleepnet, &g_cva, &g_activity, &g_stepmotion, &g_illness, &g_bdi, &g_energy}) {
         slot->module.reset();
         slot->path.clear();
     }
@@ -248,6 +248,47 @@ int oura_bdi(const char *model_path, int64_t bedtime_start_ms, int64_t bedtime_e
         return 0;
     } catch (const std::exception &e) {
         NSLog(@"oura_bdi: %s", e.what());
+        return -1;
+    }
+}
+
+static at::Tensor stamps(const int64_t *p, int64_t n) {
+    if (n <= 0) return at::empty({0, 1}, at::kLong);
+    return at::from_blob((void *)p, {n, 1}, at::kLong).clone();
+}
+
+int oura_energy(const char *model_path, const float *demo, const float *details,
+                int64_t start_ms, int64_t end_ms,
+                const int64_t *met_ts, const float *met, int n_met,
+                const int64_t *motion_ts, const float *motion, int n_motion,
+                const int64_t *step_ts, const float *step, int n_step,
+                const int64_t *hr_ts, const float *hr, int n_hr,
+                const int64_t *temp_ts, const float *temp, int n_temp,
+                double *out) {
+    if (!model_path || !demo || !details || !out || end_ms <= start_ms) return -1;
+    std::lock_guard<std::mutex> lock(g_torch);
+    try {
+        auto &m = cachedModule(model_path, g_energy.module, g_energy.path);
+        int64_t window[2] = {start_ms, end_ms};
+        auto trends = at::full({15}, NAN, at::kFloat);  // model defaults for every trend
+        std::vector<c10::IValue> inputs{
+            at::from_blob((void *)demo, {5}, at::kFloat).clone(),
+            at::from_blob((void *)details, {2}, at::kFloat).clone(),
+            at::from_blob(window, {2}, at::kLong).clone(),
+            blobFloat2d(met, n_met, 1), stamps(met_ts, n_met),
+            blobFloat2d(motion, n_motion, 8), stamps(motion_ts, n_motion),
+            blobFloat2d(step, n_step, 11), stamps(step_ts, n_step),
+            blobFloat2d(hr, n_hr, 2), stamps(hr_ts, n_hr),
+            blobFloat2d(temp, n_temp, 1), stamps(temp_ts, n_temp),
+            trends,
+            at::empty({0, 5}, at::kFloat), at::empty({0, 1}, at::kLong),  // location: unused
+        };
+        auto res = m.forward(inputs).toTuple();
+        // (active_kcal, average_met, intensity, table_kcal, mode, met_rescaled, effort, effort_src)
+        for (int i = 0; i < 5; ++i) out[i] = res->elements()[i].toTensor().reshape({-1})[0].item<double>();
+        return 0;
+    } catch (const std::exception &e) {
+        NSLog(@"oura_energy: %s", e.what());
         return -1;
     }
 }

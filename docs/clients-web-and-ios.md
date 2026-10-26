@@ -53,6 +53,7 @@ metric there once and both clients receive it in the JSON.
 | **VO₂max estimate** | `renderCardio` | Fitness section | `fitness.vo2max` | — (Jackson, model-free) |
 | Movement ridge | `ridgeSvg` | `MovementRidge` | `activity_profile` | — (MET, model-free) |
 | **Activity sessions / workouts** | `openActDetail` (session) | workouts section | `activity` | AAD (web: Python · iOS: `ActivityModel`) |
+| **Workout calories** (Oura's per-workout energy model; MET estimate stays as `active_kcal`) | `openActDetail` "Calories (Oura model)" | Today tab workouts card | `activity[].kcal` (iOS `WorkoutSession.kcal`) | energy_expenditure_2_4_1 (web: `run_activity_model.py` · iOS: `ActivityModel.workoutEnergy`) |
 | Steps / active calories / **distance** | activity report stats | activity day stats | `activity_daily` (incl. `distance_m`) | — |
 | Previous days browser | `openDaysBrowser` → `openDayPage` | `AllDaysView` → `DayDetailView` | day keys | — |
 | Device & data health | `renderDevice` | device section | `device`, `streams` | — |

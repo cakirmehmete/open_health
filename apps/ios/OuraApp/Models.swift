@@ -165,6 +165,8 @@ struct Profile: Codable { var sex: String?; var age: Double?; var height_m: Doub
 // a detected activity session (on-device automatic_activity_detection)
 struct WorkoutSession: Identifiable, Codable {
     let start: String; let end: String; let durationMin: Int; let label: String; let isWorkout: Double
+    /// Active kcal from Oura's energy_expenditure model (on-device; nil without it).
+    var kcal: Double? = nil
     var id: String { start + label }
     var dayLabel: String { String(start.prefix(10)) }      // YYYY-MM-DD
     var startHM: String { String(start.suffix(5)) }        // HH:MM
