@@ -78,6 +78,16 @@ a nap doesn't shadow the real sleep.
   results and analyzes only the latest night when its result is missing. A changed
   bedtime window counts as missing. Older missing nights require “Refresh analysis”
   in their Sleep tab. Automatic runs do not prune the historical model cache.
+- **iOS home = status + Insights**: the iOS home is the ring → Health status screen
+  (`StatusView.swift`). Its Insights section lists the latest result of each on-device
+  model (last night's staging, cardiovascular age, latest workout, Symptom Radar, VO₂max)
+  and opens the full reports (`RootView.content`, the old home) in place; "Models on this
+  phone" (`ModelListView`) shows which version of each family the build bundles. The web
+  home already shows all of these, so it has no separate Insights list.
+- **Model versions (both)**: a client looks a model up by family, not exact file name.
+  It prefers the version its inputs were validated on and otherwise runs the newest one
+  present (iOS `ModelFiles.find`, Python `_common.resolve_model`). iOS caches key on the
+  bundled model name, so a new version recomputes. Add a family to both when wiring one.
 - **iOS compact disclosures**: symptom radar initially shows its status and explanation;
   “View details” reveals measurements and personal ranges together. Ring troubleshooting
   is a "Help & diagnostics" card of grouped rows (check data, share report, export raw

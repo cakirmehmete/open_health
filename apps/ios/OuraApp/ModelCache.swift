@@ -194,8 +194,10 @@ enum ModelCacheStore {
     /// `timezone: false` is for models whose inputs and outputs are absolute times
     /// (sleep staging, CVA): the timezone cannot change their result, and keying on it
     /// recomputed all of them after every trip.
-    static func globalKey(profile: Profile?, timezone: Bool = true) -> String {
-        let material = "v\(version)|\(profile?.sex ?? "")|\(profile?.age ?? -1)"
+    static func globalKey(profile: Profile?, timezone: Bool = true, model: String? = nil) -> String {
+        // `model` is the bundled file a result came from, so a newer model version
+        // recomputes instead of serving the old version's cached output.
+        let material = "v\(version)|" + (model.map { "\($0)|" } ?? "") + "\(profile?.sex ?? "")|\(profile?.age ?? -1)"
             + "|\(profile?.height_m ?? -1)|\(profile?.weight_kg ?? -1)|\(profile?.ring_size ?? -1)"
             + (timezone ? "|\(TimeZone.current.identifier)" : "")
             + "|\(storeKind())"

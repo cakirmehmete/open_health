@@ -63,6 +63,7 @@ targets:
       - path: BackgroundSync.swift
       - path: RingWatcher.swift
       - path: StatusView.swift
+      - path: ModelFiles.swift
       - path: ../generated/oura_core.swift
       - path: Assets.xcassets
     dependencies:

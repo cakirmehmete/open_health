@@ -10,13 +10,15 @@ enum CvaModel {
     private static let SEG_LEN = 1500
     private static let GAP_DS: Int64 = 20  // >2 s splits two PPG measurements
 
+    private static var modelName: String? { ModelFiles.find("cva", validated: "2_1_0")?.name }
+
     struct Result: Codable { let vascularAge: Double; let pwv: Double; let segments: Int }
 
     // Returns the CVA result (nil when there's simply no usable PPG), plus a non-nil
     // `error` only for genuine failures (model missing / inference failed despite data).
     static func run(sex: String, age: Double, heightM: Double, weightKg: Double, ringSize: Double) -> (result: Result?, error: String?) {
         let dbPath = DB.readPath()
-        guard let modelPath = Bundle.main.path(forResource: "cva_2_1_0", ofType: "ptl")
+        guard let modelPath = ModelFiles.find("cva", validated: "2_1_0")?.path
         else { return (nil, "cardiovascular model file missing from the app bundle") }
 
         let sexVal: Float = sex.uppercased() == "F" ? -1 : (sex.uppercased() == "O" ? 0 : 1)
@@ -26,7 +28,7 @@ enum CvaModel {
         // plenty, and every sync adds PPG segments that would otherwise trigger a
         // ~30 s recompute on the phone. The demographics are part of that daily stamp,
         // so a profile edit still recomputes the same day.
-        let key = ModelCacheStore.globalKey(profile: nil, timezone: false)
+        let key = ModelCacheStore.globalKey(profile: nil, timezone: false, model: modelName)
         var demoHash = FNV64(); demoHash.combine(demo)
         let today = "\(localDay())|\(demoHash.hex)"
         if ModelCacheStore.loadDigest(ModelCacheStore.cvaFile, globalKey: key) == today {

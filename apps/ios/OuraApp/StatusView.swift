@@ -30,8 +30,8 @@ enum BackgroundLog {
     }
 }
 
-/// Home screen. Trends and charts live in the app reading Apple Health; this one
-/// only answers "is the ring → Health pipeline healthy?".
+/// Home screen: is the ring → Health pipeline healthy, plus the latest result of each
+/// on-device Oura model. The full reports open from the Insights section.
 struct StatusView: View {
     @ObservedObject var ring: RingSync
     @ObservedObject var health: HealthExport = .shared
@@ -39,12 +39,14 @@ struct StatusView: View {
     let onSyncNow: () -> Void
     let onOpenRing: () -> Void
     let onOpenProfile: () -> Void
+    let onOpenInsights: () -> Void
 
     var body: some View {
         // Relative times ("12 min ago") and the background log refresh on their own.
         TimelineView(.periodic(from: .now, by: 30)) { context in
             List {
                 ringSection(now: context.date)
+                insightsSection
                 syncSection(now: context.date)
                 healthSection(now: context.date)
                 backgroundSection(now: context.date)
@@ -83,6 +85,105 @@ struct StatusView: View {
                     .font(.footnote).foregroundStyle(.red)
             }
         }
+    }
+
+    // ── Insights ──
+    // One row per on-device model: its latest result, or why there is none yet.
+    @ViewBuilder private var insightsSection: some View {
+        Section {
+            if let s = summary, s.error == nil {
+                sleepRow(s)
+                cardioRow(s)
+                workoutsRow(s)
+                radarRow(s)
+                if let vo2 = s.fitness?.vo2max {
+                    LabeledContent("VO₂max estimate", value: String(format: "%.0f ml/kg/min", vo2))
+                }
+                ForEach(s.modelErrors, id: \.self) { error in
+                    Text(error).font(.caption).foregroundStyle(.orange)
+                }
+                Button("Open sleep, activity & heart reports", action: onOpenInsights)
+            } else {
+                Text("Results appear after the first sync.").font(.footnote).foregroundStyle(.secondary)
+            }
+            NavigationLink("Models on this phone") { ModelListView() }
+        } header: {
+            Text("Insights")
+        }
+    }
+
+    @ViewBuilder private func sleepRow(_ s: Summary) -> some View {
+        if let night = s.nights.first(where: \.hasHypnogram) ?? s.nights.first {
+            LabeledContent("Last night") {
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(night.in_bed_h.map { Self.hours($0) + " in bed" } ?? night.date ?? "–")
+                    if night.hasHypnogram, let deep = night.deep_pct, let rem = night.rem_pct {
+                        Text("deep \(Int(deep))% · REM \(Int(rem))%" + (night.efficiency.map { " · \(Int($0))% efficient" } ?? ""))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    if night.hasHypnogram {
+                        Text(Sleep.isOuraStaging(night.staging_source) ? "staged by Oura's model" : "signal estimate")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+            }
+        } else {
+            LabeledContent("Last night", value: "no night yet")
+        }
+    }
+
+    @ViewBuilder private func cardioRow(_ s: Summary) -> some View {
+        if let age = s.cardio?.vascular_age {
+            LabeledContent("Cardiovascular age") {
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("\(Int(age.rounded())) years")
+                    if let real = s.cardio?.chronological_age {
+                        let gap = age - real
+                        Text(abs(gap) < 1 ? "same as your age" : String(format: "%.0f years %@ your age", abs(gap), gap < 0 ? "below" : "above"))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+        } else if ModelFiles.find("cva", validated: "2_1_0") != nil {
+            LabeledContent("Cardiovascular age", value: "needs cva_ppg readings")
+        }
+    }
+
+    @ViewBuilder private func workoutsRow(_ s: Summary) -> some View {
+        let workouts = s.workouts.filter { $0.isWorkout > 0.5 }
+        if let latest = workouts.max(by: { $0.start < $1.start }) {
+            LabeledContent("Latest workout") {
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("\(latest.label.capitalized) · \(latest.durationMin) min")
+                    Text(latest.start).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        } else if ModelFiles.find("automatic_activity_detection", validated: "3_1_11") != nil {
+            LabeledContent("Latest workout", value: "none detected")
+        }
+    }
+
+    @ViewBuilder private func radarRow(_ s: Summary) -> some View {
+        if let radar = s.illness ?? s.symptoms, radar.available {
+            LabeledContent("Symptom radar") {
+                Text(Self.radarLabel(radar.trafficLight))
+                    .foregroundStyle(radar.trafficLight == "MAJOR_SIGNS" ? .red : (radar.trafficLight == "MINOR_SIGNS" ? .orange : .primary))
+            }
+        }
+    }
+
+    private static func radarLabel(_ light: String) -> String {
+        switch light {
+        case "NO_SIGNS": return "No signs"
+        case "MINOR_SIGNS": return "Minor signs"
+        case "MAJOR_SIGNS": return "Major signs"
+        default: return "Needs more nights"
+        }
+    }
+
+    private static func hours(_ h: Double) -> String {
+        let m = Int((h * 60).rounded())
+        return "\(m / 60) h \(m % 60) min"
     }
 
     // ── Sync ──
@@ -190,5 +291,35 @@ struct StatusView: View {
     private static func staleness(_ date: Date, now: Date) -> Color {
         let s = now.timeIntervalSince(date)
         return s < 2 * 3600 ? .green : (s < 6 * 3600 ? .orange : .red)
+    }
+}
+
+/// Which Oura model files this build bundles, and which version each family runs.
+struct ModelListView: View {
+    var body: some View {
+        List {
+            Section {
+                ForEach(ModelFiles.known, id: \.family) { model in
+                    let all = ModelFiles.bundled(model.family)
+                    let picked = ModelFiles.find(model.family, validated: model.validated)
+                    LabeledContent(model.title) {
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text(picked.map { "v" + ModelFiles.display($0.version) } ?? "not bundled")
+                                .foregroundStyle(picked == nil ? .secondary : .primary)
+                            if let picked, picked.version != model.validated {
+                                Text("tested on v\(ModelFiles.display(model.validated))")
+                                    .font(.caption2).foregroundStyle(.orange)
+                            }
+                            if all.count > 1 {
+                                Text("\(all.count) versions bundled").font(.caption2).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            } footer: {
+                Text("Oura's models are decrypted and exported on your Mac (tools/export_mobile.py) and bundled at build time. A missing model only hides its result.")
+            }
+        }
+        .navigationTitle("Models")
     }
 }

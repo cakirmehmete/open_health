@@ -41,10 +41,10 @@ from statistics import median
 
 import torch
 
-from _common import resolve_db
+from _common import resolve_db, resolve_model
 
 REPO = Path(__file__).resolve().parent.parent
-MODEL = REPO / "notes" / "models" / "stress_daytime_sensing_1_1_0.pt"
+MODEL = resolve_model(REPO, "stress_daytime_sensing", "1_1_0")
 DS_PER_5MIN = 3000          # 5 min in ring deciseconds (1 s = 10 ds)
 MIN_DAYTIME_FOR_BASELINE = 3  # below this, dhrv_baseline falls back to the night baseline
 OUT_LABELS = ["intensity", "stress_limit", "recovery_limit",

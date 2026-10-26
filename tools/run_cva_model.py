@@ -32,11 +32,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from _common import resolve_db, resolve_models_dir
+from _common import resolve_db, resolve_model
 
 REPO = Path(__file__).resolve().parent.parent
-MODEL_NAME = "cva_2_1_0.pt"
-MODEL = resolve_models_dir(REPO, MODEL_NAME) / MODEL_NAME
+MODEL = resolve_model(REPO, "cva", "2_1_0")
 SEG_LEN = 1500          # samples per segment (hard model constant)
 GAP_DS = 20             # >2 s (deciseconds) splits two PPG measurements
 

@@ -12,6 +12,8 @@ import Foundation
 // is reconstructed from the IBI stream (respiratory sinus arrhythmia), matching the
 // Python runner's respiratory_rate.py.
 enum IllnessModel {
+    private static var modelName: String? { ModelFiles.find("illness_detection", validated: "0_5_1")?.name }
+
     static let nDays = 30
     private static let ibiTags: Set<Int> = [0x44, 0x60, 0x71]
     private static let tempTags: Set<Int> = [0x46, 0x69, 0x75]
@@ -82,7 +84,7 @@ enum IllnessModel {
     /// return it without the full-history IBI ingest (the slowest stage of a launch).
     static func cachedRun(profile: Profile?, storeDigest: String?) -> (result: IllnessResult?, error: String?)? {
         guard let storeDigest else { return nil }
-        let cacheKey = ModelCacheStore.globalKey(profile: profile)
+        let cacheKey = ModelCacheStore.globalKey(profile: profile, model: modelName)
         guard ModelCacheStore.loadDigest(ModelCacheStore.illnessFile, globalKey: cacheKey) == storeDigest else { return nil }
         let cached: [String: FingerprintedEntry<IllnessResult>] = ModelCacheStore.load(ModelCacheStore.illnessFile, globalKey: cacheKey)
         dlog("models", "illness cache=digest-hit")
@@ -94,10 +96,10 @@ enum IllnessModel {
 
     static func run(profile: Profile?, events: EventStore.Events,
                     clock: EventStore.RingClock, knownDigest: String? = nil) -> (result: IllnessResult?, error: String?) {
-        guard let modelPath = Bundle.main.path(forResource: "illness_detection_0_5_1", ofType: "ptl")
+        guard let modelPath = ModelFiles.find("illness_detection", validated: "0_5_1")?.path
         else { return (nil, "illness model file missing from the app bundle") }
         guard !events.isEmpty else { return (nil, nil) }
-        let cacheKey = ModelCacheStore.globalKey(profile: profile)
+        let cacheKey = ModelCacheStore.globalKey(profile: profile, model: modelName)
         let storeDigest = knownDigest ?? events.digest()
         if let hit = cachedRun(profile: profile, storeDigest: storeDigest) { return hit }
         func u(_ ds: Int64, _ cu: Int64) -> Double { clock.unixSeconds(ds, capturedUnix: cu) }

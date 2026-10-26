@@ -16,17 +16,16 @@ from pathlib import Path
 
 import torch
 
-from _common import resolve_db, resolve_models_dir
+from _common import model_version, resolve_db, resolve_model
 from activity_features import decoder_to_aad, unpack_real_step
 from epoch_time import build_epochs, is_dated, make_unix_s
 
 warnings.filterwarnings("ignore", message=".*searchsorted.*")
 
 REPO = Path(__file__).resolve().parent.parent
-MODEL_NAME = "automatic_activity_detection_3_1_11.pt"
-MODEL = resolve_models_dir(REPO, MODEL_NAME) / MODEL_NAME
-STEP_MODEL = MODEL.parent / "steps_motion_decoder_2_0_0.pt"
-MODEL_VERSION = "3.1.11"
+MODEL = resolve_model(REPO, "automatic_activity_detection", "3_1_11")
+STEP_MODEL = resolve_model(REPO, "steps_motion_decoder", "2_0_0")
+MODEL_VERSION = model_version(MODEL, "automatic_activity_detection")
 
 BEHAVIOR = {
     -1: "nothing", 0: "<empty>", 1: "badminton", 2: "boxing", 3: "crossCountrySkiing",
@@ -114,7 +113,7 @@ def model_would_reject(met, motion, temperature, heart_rate, step_rows):
     return met[0][0] > last_valid
 
 
-STEP_MODEL_MOBILE = MODEL.parent / "mobile" / "steps_motion_decoder_2_0_0.ptl"
+STEP_MODEL_MOBILE = STEP_MODEL.parent / "mobile" / (STEP_MODEL.stem + ".ptl")
 
 
 def load_step_decoder():

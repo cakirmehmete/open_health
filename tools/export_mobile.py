@@ -23,42 +23,17 @@ from pathlib import Path
 warnings.filterwarnings("ignore")
 import torch
 
+from _common import discover_models
+
 REPO = Path(__file__).resolve().parent.parent
 MODELS = REPO / "notes" / "models"
 OUT = MODELS / "mobile"
 
-# newest version per family (same list as inspect_models.py)
-NEWEST = [
-    "automatic_activity_detection_3_1_11",
-    "atlas_2_1_0",
-    "awhr_imputation_1_2_0",
-    "awhr_profile_selector_1_0_1",
-    "cumulative_stress_1_2_2",
-    "cva_2_1_0",
-    "cva_calibrator_1_3_0",
-    "daily_medians_1_1_0",
-    "daily_short_term_baselines_1_1_0",
-    "dhrv_imputation_1_1_0",
-    "energy_expenditure_1_0_0",
-    "halite_1_2_0",
-    "illness_detection_0_5_1",
-    "insomnia_0_1_4",
-    "meal_timing_0_1_0",
-    "popsicle_1_6_0",
-    "pregnancy_biometrics_0_4_0",
-    "sleepnet_bdi_0_4_0",
-    "sleepnet_moonstone_1_2_0",
-    "sleepstaging_2_6_0",
-    "step_counter_1_3_0",
-    "steps_motion_decoder_2_0_0",
-    "stress_daytime_sensing_1_1_0",
-    "stress_resilience_2_2_1",
-    "training_stress_score_0_2_1",
-    "whr_2_7_1",
-]
+# Discovered from notes/models/ (newest version per family), like inspect_models.py.
+NEWEST = discover_models(MODELS)
 
 
-def repair_activity_empty_peaks(model):
+def repair_activity_empty_peaks(model, strict=True):
     """Repair AAD 3.1.11's scripted find_peaks(<3 samples) empty-list type.
 
     The source uses torch.tensor([], dtype=int64), serialized as List[Tensor].
@@ -86,6 +61,8 @@ def repair_activity_empty_peaks(model):
                 repaired += 1
 
     visit(model.forward.graph)
+    if repaired == 0 and not strict:
+        return model  # a later AAD version without the empty-list branch
     if repaired != 1:
         raise RuntimeError(f"AAD empty-peak repair expected one branch, found {repaired}")
     torch._C._jit_pass_lint(model.forward.graph)
@@ -103,8 +80,8 @@ def export_one(name):
             # (TorchBridge.mm + NssaOps.c).
             import nssa_ops  # noqa: F401
         m = torch.jit.load(str(src), map_location="cpu").eval()
-        if name == "automatic_activity_detection_3_1_11":
-            m = repair_activity_empty_peaks(m)
+        if name.startswith("automatic_activity_detection_"):
+            m = repair_activity_empty_peaks(m, strict=name == "automatic_activity_detection_3_1_11")
         dst = OUT / f"{name}.ptl"
         m._save_for_lite_interpreter(str(dst))
         return name, dst.stat().st_size, None
@@ -118,7 +95,7 @@ def main():
     parser.add_argument("models", nargs="*", metavar="MODEL", help="Model names; defaults to all newest versions")
     args = parser.parse_args()
     names = args.models or NEWEST
-    unknown = set(names) - set(NEWEST)
+    unknown = set(names) - set(discover_models(MODELS, newest_only=False))
     if unknown:
         parser.error(f"unknown models: {', '.join(sorted(unknown))}")
     OUT.mkdir(parents=True, exist_ok=True)

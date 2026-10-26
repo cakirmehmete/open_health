@@ -19,13 +19,12 @@ import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _common import resolve_model
 from epoch_time import build_epochs, is_dated, make_unix_s
 from respiratory_rate import respiratory_rate
 
 REPO = Path(__file__).resolve().parent.parent
-MODEL = str((REPO / "notes/models/illness_detection_0_5_1.pt"))
-if not Path(MODEL).exists():
-    MODEL = str(REPO.parent / "open_oura/notes/models/illness_detection_0_5_1.pt")
+MODEL = str(resolve_model(REPO, "illness_detection", "0_5_1"))
 
 N_DAYS = 30
 IBI_TAGS = {0x44, 0x60, 0x71}

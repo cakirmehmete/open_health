@@ -37,6 +37,17 @@ Of the ~26 newest-version models, most are blocked on a signal we can't get:
 
 (The full per-model matrix lives in the local-only `notes/model-usage-map.md`.)
 
+## Model versions
+
+Runners and the iOS app find a model by **family**, not exact file name: each names
+the version its inputs were validated on and falls back to the newest local version
+(`_common.resolve_model`, iOS `ModelFiles.find`), reporting the version it ran. So a
+newer APK's files (`cva_2_1_5`, `automatic_activity_detection_3_1_15`) work without
+renames, but check the outputs against the validated version before trusting them.
+`inspect_models.py` and `export_mobile.py` discover every file in `notes/models/`
+(newest per family; `inspect_models.py --all-versions` for all), and
+`inspect_models.py --json` is a weight-free schema dump that is safe to share.
+
 ## Notes
 - All runners read `oura.db` by default and reference `notes/models/` (both
   gitignored — no model weights or personal data are committed).

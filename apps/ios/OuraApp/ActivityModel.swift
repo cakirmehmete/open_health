@@ -50,13 +50,14 @@ enum ActivityModel {
     /// changes, so cached results — cached failures above all — are recomputed once
     /// instead of being trusted for inputs the new pipeline would build differently.
     private static let pipelineVersion = 2
+    private static var modelName: String? { ModelFiles.find("automatic_activity_detection", validated: "3_1_11")?.name }
 
     /// The last complete pass's result when the store is unchanged since (same rows,
     /// same clock anchors) — no event read needed. `storeDigest` is `Events.digest()`.
     static func cachedRun(profile: Profile?, storeDigest: String?,
                           cacheFile: String = ModelCacheStore.activityFile) -> (sessions: [WorkoutSession], error: String?)? {
         guard let storeDigest else { return nil }
-        let globalKey = ModelCacheStore.globalKey(profile: profile)
+        let globalKey = ModelCacheStore.globalKey(profile: profile, model: modelName)
         guard ModelCacheStore.loadDigest(cacheFile, globalKey: globalKey) == "v\(pipelineVersion):\(storeDigest)"
         else { return nil }
         let cache: [String: ActivityDayEntry] = ModelCacheStore.load(cacheFile, globalKey: globalKey)
@@ -71,11 +72,11 @@ enum ActivityModel {
                     knownDigest: String? = nil,
                     progress: @escaping @Sendable (String) -> Void = { _ in },
                     inputsSink: (([String: Any]) -> Void)? = nil) -> (sessions: [WorkoutSession], error: String?) {
-        guard let aadPath = Bundle.main.path(forResource: "automatic_activity_detection_3_1_11", ofType: "ptl")
+        guard let aadPath = ModelFiles.find("automatic_activity_detection", validated: "3_1_11")?.path
         else { return ([], "activity model file missing from the app bundle") }
 
         guard !events.isEmpty else { return ([], onlyDay == nil ? nil : "No activity data is saved for this day.") }
-        let globalKey = ModelCacheStore.globalKey(profile: profile)
+        let globalKey = ModelCacheStore.globalKey(profile: profile, model: modelName)
         // Nothing changed since the last complete pass: the cached days are the
         // answer, without streaming the store. The caller may pass the digest it
         // already computed (one full-table scan per pass instead of one per model).
@@ -401,7 +402,7 @@ enum ActivityModel {
     /// as one tensor and jetsam-killed the app.
     private static func decodeStepPackets(_ packets: [TimedRow]) throws -> [TimedRow] {
         guard !packets.isEmpty else { return [] }
-        guard let modelPath = Bundle.main.path(forResource: "steps_motion_decoder_2_0_0", ofType: "ptl")
+        guard let modelPath = ModelFiles.find("steps_motion_decoder", validated: "2_0_0")?.path
         else { throw InferenceFailure("step decoder model file is missing from the app bundle") }
         let chunk = 4096
         let overlap = 24
