@@ -11,6 +11,10 @@ final class HealthExport: ObservableObject {
     static let shared = HealthExport()
     private static let enabledKey = "health.export.enabled"
     private static let fingerprintKey = "health.export.fp"
+    private static let pendingKey = "health.export.pending"
+    /// The last export didn't land (typically: Health is unreadable while the phone
+    /// is locked). The cached summary is retried once the phone unlocks.
+    static var exportPending: Bool { UserDefaults.standard.bool(forKey: pendingKey) }
     private static let syncPrefix = "openoura."
 
     /// RMSSD and SDNN are different measurements. SDKs before iOS 27 do not
@@ -196,16 +200,18 @@ final class HealthExport: ObservableObject {
         group.wait()
         if let authError {
             DispatchQueue.main.async { self.status = authError.localizedDescription }
+            UserDefaults.standard.set(true, forKey: Self.pendingKey)
             return false
         }
         guard authOK else {
             DispatchQueue.main.async { self.status = "Apple Health write access was not granted." }
+            UserDefaults.standard.set(true, forKey: Self.pendingKey)
             return false
         }
 
         let samples = buildSamples(summary)
         let workouts = plannedWorkouts(summary.workouts)
-        let beatSeries = plannedHeartbeats(summary.nights)
+        let beatSeries = plannedHeartbeats(Self.distinctNights(summary.nights))
         dlog("health", "export \(samples.count) samples, \(workouts.count) workouts, \(beatSeries.count) beat series")
         let types = Self.reconciliationTypes(canShare: canShare)
         let collect = DispatchGroup()
@@ -224,12 +230,15 @@ final class HealthExport: ObservableObject {
         }
         collect.wait()
         if let queryError {
+            dlog("health", "export read failed: \(queryError)")
             DispatchQueue.main.async { self.status = queryError.localizedDescription }
+            UserDefaults.standard.set(true, forKey: Self.pendingKey)
             return false
         }
         // Even a now-empty export must reconcile legacy HRV records.
         if samples.isEmpty, workouts.isEmpty, beatSeries.isEmpty, ours.isEmpty {
             DispatchQueue.main.async { self.status = "Nothing to export. Check Apple Health permissions for Open Oura." }
+            UserDefaults.standard.set(false, forKey: Self.pendingKey)
             return false
         }
 
@@ -293,6 +302,7 @@ final class HealthExport: ObservableObject {
                 dlog("health", self.status)
             }
         }
+        UserDefaults.standard.set(writeError != nil, forKey: Self.pendingKey)
         return writeError == nil
     }
 
@@ -327,8 +337,9 @@ final class HealthExport: ObservableObject {
 
     private func buildSamples(_ s: Summary) -> [HKObject] {
         var out: [HKObject] = []
-        for night in s.nights { out.append(contentsOf: sleepSamples(night)) }
-        for night in s.nights { out.append(contentsOf: Self.heartSamples(night, canShare: canShare)) }
+        let nights = Self.distinctNights(s.nights)
+        for night in nights { out.append(contentsOf: sleepSamples(night)) }
+        for night in nights { out.append(contentsOf: Self.heartSamples(night, canShare: canShare)) }
         out.append(contentsOf: dailySamples(s.activity_daily))
         out.append(contentsOf: daytimeHeartSamples(nights: s.nights))
         out.append(contentsOf: fitnessSamples(s.fitness))
@@ -408,6 +419,23 @@ final class HealthExport: ObservableObject {
     static let maxGap: Double = 2.5
     static let maxSpan: Double = 300
     static let minBeats = 30
+
+    /// The summary can carry a night twice: once as the ring first postprocessed it
+    /// mid-sleep, again when it finished. Exporting both would double the sleep in
+    /// Health, so keep only the latest capture of any overlapping nights.
+    static func distinctNights(_ nights: [NightRow]) -> [NightRow] {
+        let newestFirst = nights.sorted {
+            ($0.captured_unix ?? 0, $0.end_unix ?? 0) > ($1.captured_unix ?? 0, $1.end_unix ?? 0)
+        }
+        var kept: [NightRow] = []
+        var spans: [(Date, Date)] = []
+        for night in newestFirst {
+            guard let span = nightInterval(night) else { continue }
+            if spans.contains(where: { span.0 < $0.1 && span.1 > $0.0 }) { continue }
+            kept.append(night); spans.append(span)
+        }
+        return kept
+    }
 
     private func plannedHeartbeats(_ nights: [NightRow]) -> [PlannedHeartbeats] {
         guard canShare(HKSeriesType.heartbeat()) else { return [] }

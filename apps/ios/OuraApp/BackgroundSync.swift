@@ -61,9 +61,16 @@ enum BackgroundSync {
         let lastAttempt = UserDefaults.standard.object(forKey: lastWakeKey) as? Date
         let recent = [RingSync.shared.lastSuccessfulSyncAt, lastAttempt]
             .compactMap { $0 }.contains { now.timeIntervalSince($0) < minimumGap }
-        guard UIApplication.shared.applicationState != .active, !recent,
+        guard UIApplication.shared.applicationState != .active,
               !WorkCoordinator.shared.backgroundSession else {
             completion?()
+            return
+        }
+        if recent {
+            // No ring sync yet, but a sync that ran while the phone was locked left
+            // its Health write undone. The step observer only fires once Health is
+            // readable again, i.e. unlocked: the moment to deliver it.
+            flushPendingExport(reason: reason, completion: completion)
             return
         }
         UserDefaults.standard.set(now, forKey: lastWakeKey)
@@ -78,6 +85,29 @@ enum BackgroundSync {
         }
         Task { @MainActor in
             _ = await run(reason: reason)
+            if task != .invalid { UIApplication.shared.endBackgroundTask(task); task = .invalid }
+            completion?()
+        }
+    }
+
+    /// Writes the last background summary to Health if its export is still owed.
+    static func flushPendingExport(reason: String, completion: (() -> Void)? = nil) {
+        guard HealthExport.shared.enabled, HealthExport.exportPending,
+              UIApplication.shared.isProtectedDataAvailable,
+              let summary = SummaryCache.load(), summary.error == nil else {
+            completion?()
+            return
+        }
+        var task = UIBackgroundTaskIdentifier.invalid
+        task = UIApplication.shared.beginBackgroundTask(withName: "health-flush") {
+            UIApplication.shared.endBackgroundTask(task)
+            task = .invalid
+        }
+        Task { @MainActor in
+            let exported = await HealthExport.shared.pushAndWait(summary)
+            dlog("bg", "pending Health export after \(reason): exported=\(exported)")
+            BackgroundLog.record(reason: "Phone unlocked", synced: false, exported: exported,
+                                 note: exported ? "Health updated with the last sync" : "Health still unavailable")
             if task != .invalid { UIApplication.shared.endBackgroundTask(task); task = .invalid }
             completion?()
         }
