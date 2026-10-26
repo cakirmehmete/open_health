@@ -28,6 +28,7 @@ final class HealthExport: ObservableObject {
         didSet { UserDefaults.standard.set(enabled, forKey: Self.enabledKey) }
     }
     @Published var status: String = ""
+    @Published private(set) var lastExportAt: Date? = UserDefaults.standard.object(forKey: "health.export.at") as? Date
 
     private let store = HKHealthStore()
     private let queue = DispatchQueue(label: "md.thomas.openoura.health", qos: .utility)
@@ -274,6 +275,8 @@ final class HealthExport: ObservableObject {
                 dlog("health", "export failed: \(writeError)")
             } else {
                 UserDefaults.standard.set(fp, forKey: Self.fingerprintKey)
+                self.lastExportAt = Date()
+                UserDefaults.standard.set(self.lastExportAt, forKey: "health.export.at")
                 self.status = "Exported \(added) new, removed \(stale.count) stale."
                 dlog("health", self.status)
             }

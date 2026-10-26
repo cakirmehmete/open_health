@@ -62,6 +62,7 @@ targets:
       - path: HealthExport.swift
       - path: BackgroundSync.swift
       - path: RingWatcher.swift
+      - path: StatusView.swift
       - path: ../generated/oura_core.swift
       - path: Assets.xcassets
     dependencies:

@@ -840,16 +840,12 @@ struct RootView: View {
         return stamp.isEmpty ? "latest sync" : "latest · \(stamp)"
     }
     var body: some View {
-        ZStack {
-            Obs.canvas.ignoresSafeArea()
-            if let s {
-                content(s)
-            } else {
-                VStack(spacing: 14) {
-                    ProgressView().tint(Obs.ink)
-                    Text("Loading your data…").font(Obs.mono(12)).foregroundStyle(Obs.ink2)
-                }
-            }
+        // Data and trends are read from Apple Health by another app; home is status.
+        NavigationStack {
+            StatusView(ring: ring, summary: s,
+                       onSyncNow: syncNow,
+                       onOpenRing: { showSync = true },
+                       onOpenProfile: { showProfile = true })
         }
         .fullScreenCover(item: $report) { sel in if let s { DayReportView(s: s, day: sel.day, tab: sel.sleep ? .sleep : .activity) } }
         .sheet(isPresented: $showAllDays) { if let s { AllDaysView(s: s) } }
@@ -905,6 +901,13 @@ struct RootView: View {
     /// New ring events invalidate every derived view. In particular this reruns AAD
     /// after the database transaction has completed, so newly accumulated movement
     /// cannot leave yesterday's activity sessions cached on screen.
+    private func syncNow() {
+        guard let key = Keychain.loadKey() else { showSync = true; return }
+        Task {
+            if let report = await ring.run(keyHex: key, source: "manual") { refreshAfterSync(report) }
+        }
+    }
+
     private func refreshAfterSync(_ report: SyncReport) {
         guard report.inserted > 0 else { return }
         load(force: true, clearCurrent: false)

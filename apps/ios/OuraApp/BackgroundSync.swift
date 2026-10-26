@@ -99,16 +99,36 @@ enum BackgroundSync {
         dlog("bg", "start \(reason) locked=\(!UIApplication.shared.isProtectedDataAvailable)")
         let report = await RingSync.shared.syncAutomaticallyIfNeeded()
         dlog("bg", "ring sync \(report == nil ? "skipped or failed" : "done") status=\(RingSync.shared.status)")
-        guard !Task.isCancelled else { return false }
+        let label = describe(reason)
+        guard !Task.isCancelled else {
+            BackgroundLog.record(reason: label, synced: report != nil, exported: false, note: "iOS ended the run early")
+            return false
+        }
 
         guard let summary = await summarize(), summary.error == nil else {
             dlog("bg", "summary unavailable")
+            BackgroundLog.record(reason: label, synced: report != nil, exported: false,
+                                 note: report == nil ? RingSync.shared.status : "analysis didn't finish")
             return false
         }
         SummaryCache.save(summary)
         let exported = HealthExport.shared.enabled ? await HealthExport.shared.pushAndWait(summary) : true
         dlog("bg", "end \(reason) exported=\(exported) duration=\(Int(Date().timeIntervalSince(started)))s")
+        let note = [report.map { "\($0.inserted) readings" } ?? (RingSync.shared.status.isEmpty ? "ring sync skipped" : RingSync.shared.status),
+                    exported ? nil : "Health write pending (phone locked?)"]
+            .compactMap { $0 }.joined(separator: " · ")
+        BackgroundLog.record(reason: label, synced: report != nil, exported: exported, note: note)
         return exported
+    }
+
+    private static func describe(_ reason: String) -> String {
+        switch reason {
+        case refreshID: return "Scheduled refresh"
+        case processingID: return "Scheduled long run"
+        case "ring connected", "restored link": return "Ring connected"
+        case "health steps": return "Step update"
+        default: return reason
+        }
     }
 
     /// The same analysis the home screen runs on load, minus the UI.
