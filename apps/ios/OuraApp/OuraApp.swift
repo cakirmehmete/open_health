@@ -807,8 +807,8 @@ struct RootView: View {
     @State private var showAllDays = false
     @State private var showSync = false
     @State private var showProfile = false
-    /// Home shows the status screen; the full reports are one tap away and stay
-    /// open across launches until closed.
+    /// Home is the Today (model insights) and Status tabs; the full reports open in
+    /// place and stay open across launches until closed.
     @AppStorage("home.reports") private var showReports = false
     @State private var showSleepDebt = false
     @State private var vital: VitalKind?
@@ -847,12 +847,19 @@ struct RootView: View {
             if showReports, let s {
                 ZStack { Obs.canvas.ignoresSafeArea(); content(s) }
             } else {
-                NavigationStack {
-                    StatusView(ring: ring, summary: s,
-                               onSyncNow: syncNow,
-                               onOpenRing: { showSync = true },
-                               onOpenProfile: { showProfile = true },
-                               onOpenInsights: { showReports = true })
+                TabView {
+                    NavigationStack {
+                        InsightsView(summary: s, onOpenReports: { showReports = true })
+                    }
+                    .tabItem { Label("Today", systemImage: "sun.max") }
+                    NavigationStack {
+                        StatusView(ring: ring, summary: s,
+                                   onSyncNow: syncNow,
+                                   onOpenRing: { showSync = true },
+                                   onOpenProfile: { showProfile = true },
+                                   onOpenInsights: { showReports = true })
+                    }
+                    .tabItem { Label("Status", systemImage: "dot.radiowaves.left.and.right") }
                 }
             }
         }
