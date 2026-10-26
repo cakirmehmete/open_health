@@ -66,6 +66,31 @@ final class HealthExportTests: XCTestCase {
         XCTAssertNotEqual(before, ids(night))
     }
 
+    func testHeartbeatSeriesStayInsideSleepAndSplitLikeTheWatch() {
+        // 20 minutes of steady 60 bpm beats in 6-beat ring events, a 30 s dropout,
+        // and a window that starts a minute after the first beat.
+        let t0: Int64 = 1_790_000_000_000
+        var events: [(Int64, [Int], [Int])] = []
+        var end = t0
+        for k in 0..<200 {
+            if k == 100 { end += 30_000 }
+            end += 6_000
+            events.append((end, Array(repeating: 1000, count: 6), Array(repeating: 800, count: 6)))
+        }
+        let window = (Date(timeIntervalSince1970: Double(t0) / 1000 + 60),
+                      Date(timeIntervalSince1970: Double(end) / 1000))
+        let series = HealthExport.heartbeatSeries(events: events, windows: [window])
+        XCTAssertFalse(series.isEmpty)
+        for s in series {
+            XCTAssertGreaterThanOrEqual(s.offsets.count, HealthExport.minBeats)
+            XCTAssertGreaterThanOrEqual(s.start, window.0)
+            XCTAssertLessThanOrEqual(s.offsets.last ?? 0, HealthExport.maxSpan)
+            XCTAssertEqual(s.offsets, s.offsets.sorted())
+            for (a, b) in zip(s.offsets, s.offsets.dropFirst()) { XCTAssertLessThanOrEqual(b - a, HealthExport.maxGap) }
+        }
+        XCTAssertTrue(HealthExport.heartbeatSeries(events: events, windows: []).isEmpty)
+    }
+
     func testHrvMigrationInvalidatesOldExportFingerprint() {
         // Before this fix an empty summary had an empty fingerprint, so an
         // unchanged dataset could skip the cleanup forever after an app upgrade.

@@ -52,6 +52,7 @@ final class HealthExport: ObservableObject {
         if let t = HKObjectType.quantityType(forIdentifier: .basalEnergyBurned) { types.insert(t) }
         if let t = HKObjectType.quantityType(forIdentifier: .vo2Max) { types.insert(t) }
         if let t = HKObjectType.quantityType(forIdentifier: .heartRateVariabilitySDNN) { types.insert(t) }
+        types.insert(HKSeriesType.heartbeat())
         return types
     }
 
@@ -204,7 +205,8 @@ final class HealthExport: ObservableObject {
 
         let samples = buildSamples(summary)
         let workouts = plannedWorkouts(summary.workouts)
-        dlog("health", "export \(samples.count) samples, \(workouts.count) workouts")
+        let beatSeries = plannedHeartbeats(summary.nights)
+        dlog("health", "export \(samples.count) samples, \(workouts.count) workouts, \(beatSeries.count) beat series")
         let types = Self.reconciliationTypes(canShare: canShare)
         let collect = DispatchGroup()
         let collectionLock = NSLock()
@@ -226,12 +228,12 @@ final class HealthExport: ObservableObject {
             return false
         }
         // Even a now-empty export must reconcile legacy HRV records.
-        if samples.isEmpty, workouts.isEmpty, ours.isEmpty {
+        if samples.isEmpty, workouts.isEmpty, beatSeries.isEmpty, ours.isEmpty {
             DispatchQueue.main.async { self.status = "Nothing to export. Check Apple Health permissions for Open Oura." }
             return false
         }
 
-        let wantedIDs = Set(samples.compactMap(Self.syncID) + workouts.map(\.syncID))
+        let wantedIDs = Set(samples.compactMap(Self.syncID) + workouts.map(\.syncID) + beatSeries.map(\.syncID))
         let stale = ours.filter { sample in
             guard let id = Self.syncID(sample) else { return true }
             return !wantedIDs.contains(id)
@@ -242,6 +244,7 @@ final class HealthExport: ObservableObject {
             return !existingIDs.contains(id)
         }
         let freshWorkouts = workouts.filter { !existingIDs.contains($0.syncID) }
+        let freshBeats = beatSeries.filter { !existingIDs.contains($0.syncID) }
 
         let write = DispatchGroup()
         var writeError: Error?
@@ -269,7 +272,15 @@ final class HealthExport: ObservableObject {
                 }
             }
         }
-        let added = freshSamples.count + freshWorkouts.count
+        if writeError == nil {
+            for series in freshBeats {
+                if let error = saveHeartbeats(series) {
+                    writeError = error
+                    break
+                }
+            }
+        }
+        let added = freshSamples.count + freshWorkouts.count + freshBeats.count
         DispatchQueue.main.async {
             if let writeError {
                 self.status = writeError.localizedDescription
@@ -380,6 +391,99 @@ final class HealthExport: ObservableObject {
             out.append(PlannedWorkout(id: w.id, type: Self.activityType(w.label), start: start, end: end))
         }
         return out
+    }
+
+    /// A run of consecutive ring beats inside one sleep, as Health's heartbeat series:
+    /// the same beat-to-beat record the Apple Watch writes, from which readers such
+    /// as Bevel compute HRV themselves.
+    struct PlannedHeartbeats {
+        let start: Date
+        /// Seconds since `start` for each beat.
+        let offsets: [Double]
+        var syncID: String { HealthExport.syncPrefix + "beats.\(Int(start.timeIntervalSince1970 * 1000)).\(offsets.count)" }
+    }
+
+    /// Beat series are split where the ring paused (more than `maxGap` between valid
+    /// beats) and capped at `maxSpan` like the Watch's short recordings.
+    static let maxGap: Double = 2.5
+    static let maxSpan: Double = 300
+    static let minBeats = 30
+
+    private func plannedHeartbeats(_ nights: [NightRow]) -> [PlannedHeartbeats] {
+        guard canShare(HKSeriesType.heartbeat()) else { return [] }
+        let windows = nights.compactMap(Self.nightInterval)
+            .filter { Date().timeIntervalSince($0.1) < 4 * 86400 }
+        guard !windows.isEmpty else { return [] }
+        // The newest IBI events (6 beats each); a night is a few thousand of them.
+        let json = eventsJson(dbPath: DB.readPath(), nameFilter: "ibi_and_amplitude_event", limit: 25_000)
+        guard let data = json.data(using: .utf8),
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let rows = root["events"] as? [[String: Any]] else { return [] }
+        var events: [(Int64, [Int], [Int])] = rows.compactMap { row in
+            guard let unix = (row["unix_s"] as? NSNumber)?.doubleValue,
+                  let decoded = row["decoded"] as? [String: Any],
+                  let ibis = (decoded["ibi_ms"] as? [NSNumber])?.map(\.intValue), ibis.count == 6 else { return nil }
+            return (Int64(unix * 1000), ibis, (decoded["amplitude"] as? [NSNumber])?.map(\.intValue) ?? [])
+        }
+        events.sort { $0.0 < $1.0 }
+        return Self.heartbeatSeries(events: events, windows: windows)
+    }
+
+    /// Pure: expand IBI events to beats, keep the ones Oura's own correction calls
+    /// valid, and cut them into series inside the sleep windows.
+    static func heartbeatSeries(events: [(Int64, [Int], [Int])], windows: [(Date, Date)]) -> [PlannedHeartbeats] {
+        var raw: [(Int64, Int, Int)] = []
+        var last: Int64 = 0
+        for (t, ibis, amps) in events {
+            let (beats, l) = SleepStaging.expandIbiEvent(ibis, amps, t, last)
+            raw += beats; last = l
+        }
+        guard !raw.isEmpty else { return [] }
+        let valid = IbiCorrection.correct(raw).filter { $0.3 == 1 }.map { Double($0.0) / 1000 }
+        var out: [PlannedHeartbeats] = []
+        for (from, to) in windows {
+            let lo = from.timeIntervalSince1970, hi = to.timeIntervalSince1970
+            var run: [Double] = []
+            func flush() {
+                if run.count >= minBeats, let first = run.first {
+                    out.append(PlannedHeartbeats(start: Date(timeIntervalSince1970: first), offsets: run.map { $0 - first }))
+                }
+                run = []
+            }
+            for t in valid where t >= lo && t <= hi {
+                if let prev = run.last, t - prev > maxGap || t <= prev || t - run[0] > maxSpan { flush() }
+                run.append(t)
+            }
+            flush()
+        }
+        return out
+    }
+
+    private func saveHeartbeats(_ plan: PlannedHeartbeats) -> Error? {
+        let builder = HKHeartbeatSeriesBuilder(healthStore: store, device: .local(), start: plan.start)
+        let group = DispatchGroup()
+        var failure: Error?
+        for offset in plan.offsets {
+            group.enter()
+            builder.addHeartbeatWithTimeInterval(sinceSeriesStartDate: offset, precededByGap: false) { _, error in
+                if let error { failure = error }
+                group.leave()
+            }
+        }
+        group.enter()
+        builder.addMetadata(Self.meta(String(plan.syncID.dropFirst(Self.syncPrefix.count)))) { _, error in
+            if let error { failure = error }
+            group.leave()
+        }
+        group.wait()
+        if let failure { return failure }
+        group.enter()
+        builder.finishSeries { _, error in
+            if let error { failure = error }
+            group.leave()
+        }
+        group.wait()
+        return failure
     }
 
     /// Historical workouts must go through `HKWorkoutBuilder`; the old
