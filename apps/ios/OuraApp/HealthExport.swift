@@ -545,6 +545,18 @@ final class HealthExport: ObservableObject {
         return result
     }
 
+    /// The night's 30 s stages. Rings whose firmware stages sleep itself (Gen 3)
+    /// send a hypnogram; newer firmware leaves staging to Oura's proprietary phone
+    /// model, which this build doesn't ship. Without either, stage from the ring's
+    /// overnight HR, HRV and motion (oura-summary's `stage_night_from_signals`), so
+    /// Health still gets core/deep/REM/awake rather than an unstaged "In Bed".
+    static func sleepStages(_ night: NightRow) -> (stages: [Int], estimated: Bool)? {
+        if let stages = night.hypnogram, stages.count > 1 { return (stages, false) }
+        guard night.hasSignals, let stages = Sleep.estimateStages(night: night),
+              stages.contains(where: { (1...3).contains($0) }) else { return nil }
+        return (stages, true)
+    }
+
     private func sleepSamples(_ night: NightRow) -> [HKObject] {
         guard let type = HKObjectType.categoryType(forIdentifier: .sleepAnalysis),
               canShare(type),
@@ -553,7 +565,7 @@ final class HealthExport: ObservableObject {
         let key = "\(night.start_ds ?? 0)"
         out.append(HKCategorySample(type: type, value: HKCategoryValueSleepAnalysis.inBed.rawValue,
                                     start: start, end: end, metadata: Self.meta("sleep.inbed.\(key)")))
-        guard let stages = night.hypnogram, stages.count > 1 else { return out }
+        guard let (stages, estimated) = Self.sleepStages(night) else { return out }
         let epoch = end.timeIntervalSince(start) / Double(stages.count)
         var i = 0
         while i < stages.count {
@@ -570,8 +582,10 @@ final class HealthExport: ObservableObject {
             }
             let a = start.addingTimeInterval(Double(i) * epoch)
             let b = start.addingTimeInterval(Double(j) * epoch)
+            var metadata = Self.meta("sleep.\(key).\(i).\(j).\(code)")
+            if estimated { metadata["OpenOuraStaging"] = "estimate" }
             out.append(HKCategorySample(type: type, value: value.rawValue, start: a, end: max(b, a.addingTimeInterval(1)),
-                                        metadata: Self.meta("sleep.\(key).\(i).\(j).\(code)")))
+                                        metadata: metadata))
             i = j
         }
         return out

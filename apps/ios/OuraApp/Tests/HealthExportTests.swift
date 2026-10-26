@@ -97,4 +97,28 @@ final class HealthExportTests: XCTestCase {
         XCTAssertNotEqual(HealthExport.fingerprint(Summary()), "")
         XCTAssertEqual(HealthExport.fingerprint(Summary()), HealthExport.fingerprint(Summary()))
     }
+
+    func testUnstagedNightGetsStagesFromSignals() throws {
+        // Newer ring firmware sends no hypnogram; the night still reaches Health staged.
+        var night = NightRow(ymd: "2026-10-10", start_ds: 100, start: "23:00", end: "07:00")
+        let start: Int64 = 1_791_000_000, end = start + 8 * 3600
+        night.start_unix = start
+        night.end_unix = end
+        var series = NightTimedSeries()
+        for (i, t) in stride(from: Double(start), through: Double(end), by: 300).enumerated() {
+            let phase = (t - Double(start)) / Double(end - start)
+            series.hr.append([t, 56 - 10 * sin(phase * .pi)])
+            series.hrv.append([t, 45 + 30 * sin(phase * .pi)])
+            series.motion.append([t, i % 37 == 0 ? 9 : 1])
+        }
+        night.series_t = series
+        let (stages, estimated) = try XCTUnwrap(HealthExport.sleepStages(night))
+        XCTAssertTrue(estimated)
+        XCTAssertEqual(stages.count, 960)
+        XCTAssertTrue(stages.contains { (1...3).contains($0) })
+
+        night.stages_full = [2, 2, 1, 3, 4]
+        XCTAssertEqual(HealthExport.sleepStages(night)?.estimated, false)
+        XCTAssertNil(HealthExport.sleepStages(NightRow(ymd: "2026-10-10", start_ds: 100, start: "23:00", end: "07:00")))
+    }
 }
