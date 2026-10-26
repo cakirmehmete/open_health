@@ -149,9 +149,16 @@ enum ActivityModel {
             calendar.startOfDay(for: Date(timeIntervalSince1970: $0.unixMinute * 60))
         }).sorted(by: >)
 
-        let energy = ModelFiles.find("energy_expenditure").map { model in
-            (path: model.path, demo: [profile?.sex?.uppercased() == "F" ? Float(-1) : 1, Float(profile?.height_m ?? 1.78),
-                                      Float(profile?.age ?? 30), Float(profile?.weight_kg ?? 75), Float(profile?.ring_size ?? 10)])
+        // energy_expenditure demographic: [sex (+1 M / -1 F), height_m, age, weight_kg, ring_size].
+        // Typed parts: the single literal timed out Xcode 16's type checker.
+        let energySex: Float = profile?.sex?.uppercased() == "F" ? -1 : 1
+        let energyHeight: Float = Float(profile?.height_m ?? 1.78)
+        let energyAge: Float = Float(profile?.age ?? 30)
+        let energyWeight: Float = Float(profile?.weight_kg ?? 75)
+        let energyRing: Float = Float(profile?.ring_size ?? 10)
+        let energyDemo: [Float] = [energySex, energyHeight, energyAge, energyWeight, energyRing]
+        let energy: (path: String, demo: [Float])? = ModelFiles.find("energy_expenditure").map { model in
+            (path: model.path, demo: energyDemo)
         }
         let sex: Float = profile?.sex?.uppercased() == "M" ? 1 : 0
         let user: [Float] = [Float(profile?.age ?? 30), sex, Float(profile?.height_m ?? 1.78),
