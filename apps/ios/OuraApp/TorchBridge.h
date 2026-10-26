@@ -69,6 +69,15 @@ int oura_illness(const char *model_path, const float *series, const float *scala
 int oura_bdi(const char *model_path, int64_t bedtime_start_ms, int64_t bedtime_end_ms,
              const int64_t *ibi_ts, const float *ibi_val, int n_ibi,
              float *out_metrics, int *out_epochs, int *out_flagged_sleep);
+// Daytime stress (stress_daytime_sensing_1_1_0), one awake HRV sample, mirroring
+// tools/run_stress_model.py. Times are unix ms (sample and every bedtime window).
+// Writes out[8] = [intensity, stress_limit, recovery_limit, saturation_stress_deviation,
+// saturation_recovery_deviation, intensity_scaled, stress_limit_scaled,
+// recovery_limit_scaled]. Returns 0, the validator's rejection code (6 asleep,
+// 3 MET > 1.8, ...), or -1.
+int oura_stress(const char *model_path, float dhrv, double ts_ms,
+                const double *bed_start_ms, const double *bed_end_ms, int n_bed,
+                float dhrv_baseline, float night_baseline, float ring_met, float *out);
 // Workout energy (energy_expenditure_2_4_1), mirroring tools/run_energy_model.py.
 // demo[5] = [sex(+1 M / -1 F), height_m, age, weight_kg, ring_size]; details[2] =
 // [activity_id (AAD behavior id), intensity (-1 unknown)]; each stream is n rows of

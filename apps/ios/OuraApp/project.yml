@@ -97,6 +97,7 @@ targets:
       - path: ActivityModel.swift
       - path: IllnessModel.swift
       - path: BreathingModel.swift
+      - path: StressModel.swift
       - path: TorchBridge.mm
       - path: TorchBridge.h
       - path: CrashCatch.c
@@ -125,6 +126,7 @@ targets:
           - "cva_[0-9]*.ptl"
           - "illness_detection_*.ptl"
           - "sleepnet_bdi_*.ptl"
+          - "stress_daytime_sensing_*.ptl"
           - "energy_expenditure_*.ptl"
         buildPhase: resources
       - path: ../../../oura.db

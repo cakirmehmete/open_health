@@ -49,6 +49,7 @@ metric there once and both clients receive it in the JSON.
 | Stage breakdown | `stageBar` | `StageBreakdown` | `nights[].{deep,light,rem,wake}_pct` | SleepNet |
 | **Autonomic recovery by stage** (mean HR/HRV in deep/light/REM) | `sleepSection` autonomic grid | `SleepReport` `autonomicGrid` | `nights[].autonomic` | SleepNet (needs hypnogram) |
 | **Breathing disturbances** (ODI = % of sleep epochs flagged, events/h, NREM/REM split) | `sleepSection` "Breathing disturbances" grid | Today tab card → `BreathingDetail` (InsightsView.swift) | `nights[].breathing` | SleepNet-BDI (web: `run_bdi_model.py --batch` · iOS: `BreathingModel`) |
+| **Daytime stress** (stressed / neutral / restored minutes per day, per-reading chart, baselines) | `renderStress` "Daytime stress" panel | Today tab card → `StressDetail` (InsightsView.swift) | top-level `stress` | stress_daytime_sensing (web: `run_stress_model.py --json` · iOS: `StressModel`) |
 | **Cardiovascular age** | `renderCardio` | Cardio section | `cardio` | CVA (web: Python · iOS: `CvaModel`) |
 | **VO₂max estimate** | `renderCardio` | Fitness section | `fitness.vo2max` | — (Jackson, model-free) |
 | Movement ridge | `ridgeSvg` | `MovementRidge` | `activity_profile` | — (MET, model-free) |
@@ -297,6 +298,9 @@ has no `illness`) and the ring-clock warnings (`clock.warnings`). Still iOS-only
 - **Breathing disturbances in Apple Health**: not written. HealthKit's sleeping
   breathing-disturbances type is Apple's own Watch metric, and the BDI output is a
   share of flagged epochs rather than Apple's per-hour count. Shown in both apps only.
+
+- **Daytime stress in Apple Health**: not written. HealthKit has no stress type
+  (State of Mind is a self-report). Shown in both apps only.
 
 When you close one of these gaps, update this section.
 

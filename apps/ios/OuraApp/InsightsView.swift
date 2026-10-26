@@ -71,6 +71,7 @@ struct InsightsView: View {
                     rings(s)
                     sleepCard(s)
                     breathingCard(s)
+                    stressCard(s)
                     activityCard(s)
                     vitalCard(s, .hrv, title: "Heart rate variability", icon: "waveform.path.ecg")
                     vitalCard(s, .heartRate, title: "Resting heart rate", icon: "heart")
@@ -170,6 +171,23 @@ struct InsightsView: View {
                     } else {
                         Text(b.status == 3 ? "Under 3 h of sleep last night, so no verdict."
                                            : "Too few clean heartbeats last night for a verdict.")
+                            .font(.caption).foregroundStyle(Ink.dim)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    // Oura's daytime-stress model: awake HRV against your own awake baseline.
+    @ViewBuilder private func stressCard(_ s: Summary) -> some View {
+        if let stress = s.stress, let day = stress.days.last {
+            NavigationLink { StressDetail(stress: stress) } label: {
+                InsightCard(icon: "bolt.heart", title: "Daytime stress", tone: StressDetail.tone(day),
+                            value: Self.hm(Double(day.stressed_min) / 60), unit: "stressed") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        StressStrip(day: day)
+                        Text("\(StressDetail.dayLabel(day.date)) · \(Self.hm(Double(day.restored_min) / 60)) restored · from \(day.samples) awake HRV readings")
                             .font(.caption).foregroundStyle(Ink.dim)
                     }
                 }
@@ -637,6 +655,130 @@ struct BreathingDetail: View {
         }
         .background(Ink.canvas.ignoresSafeArea())
         .navigationTitle("Breathing")
+        .navigationBarTitleDisplayMode(.inline)
+        .preferredColorScheme(.dark)
+    }
+}
+
+/// One day's stressed / neutral / restored minutes as a single bar.
+struct StressStrip: View {
+    let day: StressDay
+    var body: some View {
+        let parts: [(Int, Color)] = [(day.stressed_min, Ink.warn), (day.neutral_min, Ink.line),
+                                     (day.restored_min, Ink.good)]
+        let total = max(1, parts.map { $0.0 }.reduce(0, +))
+        GeometryReader { geo in
+            HStack(spacing: 2) {
+                ForEach(Array(parts.enumerated()), id: \.offset) { _, p in
+                    if p.0 > 0 {
+                        Capsule().fill(p.1).frame(width: max(4, geo.size.width * CGFloat(p.0) / CGFloat(total) - 2))
+                    }
+                }
+            }
+        }
+        .frame(height: 8)
+    }
+}
+
+struct StressDetail: View {
+    let stress: DaytimeStress
+    @State private var selected: Double?
+
+    static func tone(_ d: StressDay) -> Tone {
+        if d.stressed_min > 2 * max(d.restored_min, 5) { return .attention }
+        if d.stressed_min > d.restored_min { return .fair }
+        return .optimal
+    }
+    static func dayLabel(_ date: String) -> String {
+        guard let d = parse.date(from: date) else { return date }
+        let f = DateFormatter(); f.timeZone = TimeZone(identifier: "UTC"); f.dateFormat = "EEE d MMM"
+        return f.string(from: d)
+    }
+    private static let parse: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX"); f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+    private static func color(_ zone: String) -> Color {
+        zone == "stressed" ? Ink.warn : zone == "restored" ? Ink.good : Ink.dim
+    }
+
+    var body: some View {
+        // The last three days of readings: the model's scaled intensity, with the
+        // Stressed / Neutral / Restored bands its own limits draw.
+        let lastDay = stress.samples.last.map { $0.unix } ?? 0
+        let shown = stress.samples.filter { $0.unix >= lastDay - 3 * 86400 }
+        let low = shown.compactMap(\.stress_limit_scaled).max() ?? -0.1
+        let high = shown.compactMap(\.recovery_limit_scaled).min() ?? 0.1
+        let values = shown.map(\.intensity_scaled)
+        let lo = min(values.min() ?? -1, low) - 0.15, hi = max(values.max() ?? 1, high) + 0.15
+        let focus = shown.first { $0.unix == selected } ?? shown.last
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                Text("Awake HRV against your own awake baseline. Lower HRV than usual reads as stress, higher as recovery.")
+                    .font(.footnote).foregroundStyle(Ink.dim)
+                Chart {
+                    RectangleMark(yStart: .value("", lo), yEnd: .value("", low)).foregroundStyle(Ink.warn.opacity(0.08))
+                    RectangleMark(yStart: .value("", high), yEnd: .value("", hi)).foregroundStyle(Ink.good.opacity(0.08))
+                    RuleMark(y: .value("", low)).foregroundStyle(Ink.line)
+                    RuleMark(y: .value("", high)).foregroundStyle(Ink.line)
+                    ForEach(shown) { p in
+                        PointMark(x: .value("Time", Date(timeIntervalSince1970: p.unix)), y: .value("Stress", p.intensity_scaled))
+                            .foregroundStyle(Self.color(p.zone)).symbolSize(40)
+                    }
+                    if let focus {
+                        RuleMark(x: .value("Time", Date(timeIntervalSince1970: focus.unix))).foregroundStyle(Ink.dim)
+                            .annotation(position: .top) {
+                                Text("\(focus.zone.capitalized) · \(Int(focus.dhrv)) ms")
+                                    .font(.caption.weight(.medium)).padding(.horizontal, 8).padding(.vertical, 3)
+                                    .background(Capsule().fill(Ink.text)).foregroundStyle(Ink.canvas)
+                            }
+                    }
+                }
+                .chartYScale(domain: lo...hi)
+                .chartYAxis {
+                    AxisMarks(position: .trailing, values: [(lo + low) / 2, (low + high) / 2, (high + hi) / 2]) { v in
+                        AxisValueLabel {
+                            let y = v.as(Double.self) ?? 0
+                            Text(y < low ? "Stressed" : y > high ? "Restored" : "Neutral").foregroundStyle(Ink.dim)
+                        }
+                    }
+                }
+                .chartOverlay { proxy in
+                    GeometryReader { _ in
+                        Rectangle().fill(.clear).contentShape(Rectangle())
+                            .gesture(DragGesture(minimumDistance: 0).onChanged { g in
+                                guard let date: Date = proxy.value(atX: g.location.x) else { return }
+                                let t = date.timeIntervalSince1970
+                                selected = shown.min { abs($0.unix - t) < abs($1.unix - t) }?.unix
+                            })
+                    }
+                }
+                .frame(height: 240)
+
+                Text("Days").font(.title3).foregroundStyle(Ink.text)
+                ForEach(stress.days.suffix(7).reversed()) { d in
+                    let total = max(1, d.stressed_min + d.neutral_min + d.restored_min)
+                    ContributorRow(label: Self.dayLabel(d.date), tone: Self.tone(d),
+                                   fraction: Double(d.restored_min + d.neutral_min) / Double(total),
+                                   detail: "\(InsightsView.hm(Double(d.stressed_min) / 60)) stressed, \(InsightsView.hm(Double(d.restored_min) / 60)) restored, \(d.samples) readings")
+                }
+                if let d = stress.days.last {
+                    Text("Baselines").font(.title3).foregroundStyle(Ink.text)
+                    ContributorRow(label: "Awake HRV baseline", tone: .neutral, fraction: min(1, d.dhrv_baseline / 120),
+                                   detail: String(format: "%.0f ms (%@, last 14 days)", d.dhrv_baseline, d.baseline_source))
+                    ContributorRow(label: "Night HRV baseline", tone: .neutral, fraction: min(1, d.night_hrv_baseline / 120),
+                                   detail: String(format: "%.0f ms; sets the neutral zone (±%.0f ms)", d.night_hrv_baseline,
+                                                  stress.neutral_zone_ms ?? 0))
+                }
+                Text("Only calm, awake readings count: the model skips sleep and anything above light activity. Turn on daytime heart rate on the ring for more readings.")
+                    .font(.caption).foregroundStyle(Ink.dim)
+            }
+            .padding(16)
+        }
+        .background(Ink.canvas.ignoresSafeArea())
+        .navigationTitle("Daytime stress")
         .navigationBarTitleDisplayMode(.inline)
         .preferredColorScheme(.dark)
     }

@@ -503,6 +503,87 @@ function renderIllness(d) {
   box.append(el("div", "il-foot", `${basis} · ${esc(ill.date)}`));
 }
 
+// Daytime stress: Oura's stress_daytime_sensing model on each calm, awake RMSSD reading
+// (tools/run_stress_model.py). Same card on iOS (InsightsView stressCard / StressDetail).
+const STRESS_COLOR = { stressed: "#d5524a", neutral: "var(--faint)", restored: "var(--accent)" };
+const hmin = (m) => (m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`);
+
+function stressTone(day) {
+  if (day.stressed_min > 2 * Math.max(day.restored_min, 5)) return ["alert", "Mostly stressed"];
+  if (day.stressed_min > day.restored_min) return ["warn", "More stressed than restored"];
+  return ["ok", "Balanced"];
+}
+
+function stressBar(day) {
+  const total = Math.max(1, day.stressed_min + day.neutral_min + day.restored_min);
+  const bar = el("div", "st-bar");
+  for (const z of ["stressed", "neutral", "restored"]) {
+    const m = day[`${z}_min`];
+    if (m > 0) {
+      const seg = el("span", "st-seg");
+      seg.style.width = `${(100 * m) / total}%`;
+      seg.style.background = STRESS_COLOR[z];
+      seg.title = `${z} ${hmin(m)}`;
+      bar.append(seg);
+    }
+  }
+  return bar;
+}
+
+function renderStress(d) {
+  const box = $("stress");
+  box.innerHTML = "";
+  const st = d.stress;
+  const day = st?.days?.[st.days.length - 1];
+  if (!st || !day) {
+    box.append(el("div", "error", st === null || st === undefined
+      ? "Daytime stress needs the stress model (tools/run_stress_model.py) and awake HRV: turn on daytime_hr and sync a day."
+      : "No calm, awake HRV readings yet. Turn on daytime_hr on the ring and sync a day."));
+    return;
+  }
+  const [light, label] = stressTone(day);
+  const head = el("div", `il-status il-${light}`);
+  head.innerHTML = `<span class="il-dot"></span><span class="il-label">${label}</span>`;
+  box.append(head);
+  box.append(el("p", "il-copy",
+    `${esc(day.date)}: ${hmin(day.stressed_min)} stressed, ${hmin(day.restored_min)} restored, ${hmin(day.neutral_min)} neutral, from ${day.samples} awake HRV readings.`));
+  box.append(stressBar(day));
+
+  // The last three days of readings, scaled intensity, banded by the model's own limits.
+  const last = st.samples[st.samples.length - 1]?.unix || 0;
+  const pts = st.samples.filter((p) => p.unix >= last - 3 * 86400);
+  if (pts.length) {
+    const W = 320, H = 110, pad = 6;
+    const t0 = Math.min(...pts.map((p) => p.unix)), t1 = Math.max(t0 + 1, ...pts.map((p) => p.unix));
+    const low = Math.max(...pts.map((p) => p.stress_limit_scaled ?? -0.1));
+    const high = Math.min(...pts.map((p) => p.recovery_limit_scaled ?? 0.1));
+    const lo = Math.min(low, ...pts.map((p) => p.intensity_scaled)) - 0.15;
+    const hi = Math.max(high, ...pts.map((p) => p.intensity_scaled)) + 0.15;
+    const x = (t) => pad + ((W - 2 * pad) * (t - t0)) / (t1 - t0);
+    const y = (v) => pad + ((H - 2 * pad) * (hi - v)) / (hi - lo);
+    const dots = pts.map((p) => `<circle cx="${x(p.unix).toFixed(1)}" cy="${y(p.intensity_scaled).toFixed(1)}" r="3.2" fill="${STRESS_COLOR[p.zone]}"><title>${p.zone} · ${Math.round(p.dhrv)} ms</title></circle>`).join("");
+    const chart = el("div", "st-chart", `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Daytime stress readings, last three days">
+      <rect x="0" y="${y(low)}" width="${W}" height="${H - y(low)}" fill="#d5524a" opacity="0.07"/>
+      <rect x="0" y="0" width="${W}" height="${y(high)}" fill="var(--accent)" opacity="0.07"/>
+      <line x1="0" x2="${W}" y1="${y(low)}" y2="${y(low)}" stroke="var(--line)"/>
+      <line x1="0" x2="${W}" y1="${y(high)}" y2="${y(high)}" stroke="var(--line)"/>${dots}</svg>
+      <div class="st-legend">${["restored", "neutral", "stressed"].map((z) => `<span><i style="background:${STRESS_COLOR[z]}"></i>${z}</span>`).join("")}<span>last 3 days</span></div>`);
+    box.append(chart);
+  }
+  if (st.days.length > 1) {
+    const list = el("div", "st-days");
+    for (const dd of st.days.slice(-7).reverse()) {
+      const row = el("div", "st-day", `<span class="st-date">${esc(dd.date)}</span>`);
+      row.append(stressBar(dd));
+      row.append(el("span", "st-mins", `${hmin(dd.stressed_min)} / ${hmin(dd.restored_min)}`));
+      list.append(row);
+    }
+    box.append(list);
+  }
+  box.append(el("div", "il-foot",
+    `${esc(st.model)} · awake baseline ${Math.round(day.dhrv_baseline)} ms (${esc(day.baseline_source)}) · night ${Math.round(day.night_hrv_baseline)} ms`));
+}
+
 function renderCardio(d) {
   const box = $("cardio");
   const cv = d.cardio;
@@ -2242,6 +2323,7 @@ async function load() {
   renderDay(d);
   renderSleepDebt(d);
   renderIllness(d);
+  renderStress(d);
   renderCardio(d);
   renderSpo2(d);
   renderDevice(d);

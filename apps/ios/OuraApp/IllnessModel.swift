@@ -158,10 +158,12 @@ enum IllnessModel {
                 let hb = e.json["hr_bpm"] as? [Any] ?? []
                 let step = ((e.json["interval_min"] as? NSNumber)?.doubleValue ?? 5) * 60.0
                 let base = u(e.ds, e.cu)
+                // Stamped at the LAST average; earlier ones walk back by `step`, as
+                // tools/run_illness_model.py does (walking forward shifted HRV late).
                 for (i, x) in rm.enumerated() {
                     let r = (x as? NSNumber)?.doubleValue ?? 0
                     if r > 0 {
-                        hrvT.append(base + Double(i) * step)
+                        hrvT.append(base - Double(rm.count - 1 - i) * step)
                         hrvR.append(r)
                         hrvH.append(i < hb.count ? ((hb[i] as? NSNumber)?.doubleValue ?? .nan) : .nan)
                     }

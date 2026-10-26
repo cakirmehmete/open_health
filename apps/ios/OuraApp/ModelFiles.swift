@@ -22,6 +22,7 @@ enum ModelFiles {
         Family(family: "cva", validated: "2_1_0", oldest: "2_0_0", newest: "2_999_0", title: "Cardiovascular age"),
         Family(family: "energy_expenditure", validated: "2_4_1", oldest: "2_4_0", newest: "2_4_999", title: "Workout calories"),
         Family(family: "sleepnet_bdi", validated: "0_4_0", oldest: "0_4_0", newest: "0_4_999", title: "Breathing disturbances"),
+        Family(family: "stress_daytime_sensing", validated: "1_1_0", oldest: "1_0_0", newest: "1_999_0", title: "Daytime stress"),
         Family(family: "illness_detection", validated: "0_5_1", oldest: "0_5_0", newest: "0_5_999", title: "Symptom radar"),
     ]
 

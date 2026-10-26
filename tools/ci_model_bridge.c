@@ -24,4 +24,6 @@ int oura_energy(const char *path, const float *demo, const float *details, int64
                 const int64_t *mt, const float *m, int nm, const int64_t *ot, const float *o, int no,
                 const int64_t *st, const float *s, int ns, const int64_t *ht, const float *h, int nh,
                 const int64_t *tt, const float *t, int nt, double *out) { return -1; }
+int oura_stress(const char *path, float dhrv, double ts, const double *bs, const double *be, int nb,
+                float dhrv_base, float night_base, float met, float *out) { return -1; }
 void oura_torch_release(void) {}

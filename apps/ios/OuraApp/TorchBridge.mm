@@ -30,11 +30,11 @@ struct ModuleSlot {
     std::unique_ptr<torch::jit::mobile::Module> module;
     std::string path;
 };
-static ModuleSlot g_sleepnet, g_cva, g_activity, g_stepmotion, g_illness, g_bdi, g_energy;
+static ModuleSlot g_sleepnet, g_cva, g_activity, g_stepmotion, g_illness, g_bdi, g_energy, g_stress;
 
 void oura_torch_release(void) {
     std::lock_guard<std::mutex> lock(g_torch);
-    for (ModuleSlot *slot : {&g_sleepnet, &g_cva, &g_activity, &g_stepmotion, &g_illness, &g_bdi, &g_energy}) {
+    for (ModuleSlot *slot : {&g_sleepnet, &g_cva, &g_activity, &g_stepmotion, &g_illness, &g_bdi, &g_energy, &g_stress}) {
         slot->module.reset();
         slot->path.clear();
     }
@@ -248,6 +248,38 @@ int oura_bdi(const char *model_path, int64_t bedtime_start_ms, int64_t bedtime_e
         return 0;
     } catch (const std::exception &e) {
         NSLog(@"oura_bdi: %s", e.what());
+        return -1;
+    }
+}
+
+int oura_stress(const char *model_path, float dhrv, double ts_ms,
+                const double *bed_start_ms, const double *bed_end_ms, int n_bed,
+                float dhrv_baseline, float night_baseline, float ring_met, float *out) {
+    if (!model_path || !out || n_bed < 0 || (n_bed > 0 && (!bed_start_ms || !bed_end_ms))) return -1;
+    std::lock_guard<std::mutex> lock(g_torch);
+    try {
+        auto &m = cachedModule(model_path, g_stress.module, g_stress.path);
+        auto f = [](float v) { return at::full({1}, v, at::kFloat); };
+        auto d = [](const double *p, int64_t n) {
+            return n > 0 ? at::from_blob((void *)p, {n}, at::kDouble).clone() : at::empty({0}, at::kDouble);
+        };
+        auto res = m.forward({f(dhrv), at::full({1}, ts_ms, at::kDouble), d(bed_start_ms, n_bed),
+                              d(bed_end_ms, n_bed), f(dhrv_baseline), f(night_baseline), f(ring_met)});
+        auto &el = res.toTuple()->elements();
+        if (el.size() < 8) return -1;
+        for (int i = 0; i < 8; ++i) out[i] = el[i].toTensor().reshape({-1})[0].item<float>();
+        return 0;
+    } catch (const std::exception &e) {
+        // The validator raises "<code>, <message>"; hand the code back (6 asleep,
+        // 3 too active, ...) so the caller can count rejections like the runner does.
+        std::string msg = e.what();
+        size_t nl = msg.find_last_not_of(" \n");
+        size_t start = nl == std::string::npos ? 0 : msg.find_last_of('\n', nl);
+        start = start == std::string::npos ? 0 : start + 1;
+        size_t digit = msg.find_first_of("0123456789", start);
+        int code = digit == std::string::npos ? 0 : std::atoi(msg.c_str() + digit);
+        if (code > 0 && code < 100) return code;
+        NSLog(@"oura_stress: %s", e.what());
         return -1;
     }
 }

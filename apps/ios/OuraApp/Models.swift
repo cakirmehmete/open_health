@@ -241,6 +241,45 @@ struct IllnessResult: Codable {
     var biomarkers: [IllnessBiomarker]
 }
 
+/// Daytime stress (stress_daytime_sensing_1_1_0): the web summary's `stress` block,
+/// computed on-device by StressModel. Same keys as tools/run_stress_model.py --json.
+struct StressSample: Codable, Identifiable {
+    var unix: Double
+    var minutes: Int
+    var dhrv: Double
+    var met: Double
+    var zone: String            // stressed | neutral | restored
+    var intensity: Double       // ms of awake HRV vs your awake baseline
+    var intensity_scaled: Double
+    var stress_limit: Double
+    var recovery_limit: Double
+    var stress_limit_scaled: Double?
+    var recovery_limit_scaled: Double?
+    var id: Double { unix }
+}
+struct StressDay: Codable, Identifiable {
+    var date: String
+    var stressed_min: Int
+    var restored_min: Int
+    var neutral_min: Int
+    var samples: Int
+    var night_hrv_baseline: Double
+    var dhrv_baseline: Double
+    var baseline_source: String
+    var mean_intensity_scaled: Double
+    var id: String { date }
+}
+struct DaytimeStress: Codable {
+    var model: String
+    var awake_hrv_samples: Int
+    var night_hrv_samples: Int
+    var met_imputed: Int
+    var neutral_zone_ms: Double?
+    var days: [StressDay]
+    var samples: [StressSample]
+    var rejected: [String: Int]
+}
+
 /// Per-boot ring clock diagnostics from the shared brain (`clock` in the summary JSON).
 struct ClockEpoch: Codable {
     var min_ds: Int64?; var max_ds: Int64?; var span_h: Double?
@@ -324,6 +363,7 @@ struct Summary: Codable {
     var fitness: Fitness?
     var sleepDebt: SleepDebtSummary?
     var illness: IllnessResult?           // on-device only (torch Symptom Radar; not in the JSON)
+    var stress: DaytimeStress?            // on-device only (torch daytime stress; not in the JSON)
     /// Model-free Symptom Radar from the shared core — same biomarkers, same shape,
     /// judged against your own baseline. Used when the torch model is not present.
     var symptoms: IllnessResult?

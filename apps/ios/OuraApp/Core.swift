@@ -24,12 +24,13 @@ enum SummaryCache {
         var summary: Summary
         var workouts: [WorkoutSession]
         var illness: IllnessResult?
+        var stress: DaytimeStress?
     }
     static func load() -> Summary? {
         guard let data = try? Data(contentsOf: url) else { return nil }
         if let cached = try? JSONDecoder().decode(CachedSummary.self, from: data), cached.summary.error == nil {
             var result = cached.summary
-            result.workouts = cached.workouts; result.illness = cached.illness
+            result.workouts = cached.workouts; result.illness = cached.illness; result.stress = cached.stress
             return result
         }
         guard let legacy = try? JSONDecoder().decode(Summary.self, from: data), legacy.error == nil else { return nil }
@@ -39,7 +40,7 @@ enum SummaryCache {
     static func save(_ summary: Summary) {
         guard summary.error == nil else { return }
         queue.async {
-            guard let data = try? JSONEncoder().encode(CachedSummary(summary: summary, workouts: summary.workouts, illness: summary.illness)) else { return }
+            guard let data = try? JSONEncoder().encode(CachedSummary(summary: summary, workouts: summary.workouts, illness: summary.illness, stress: summary.stress)) else { return }
             try? data.write(to: url, options: .atomic)
         }
     }
@@ -184,8 +185,9 @@ enum Core {
         var cva: CvaModel.Result?
         var workouts: [WorkoutSession] = []
         var illness: IllnessResult?
-        var sleepErr: String?, cvaErr: String?, actErr: String?, illErr: String?, breathErr: String?
+        var sleepErr: String?, cvaErr: String?, actErr: String?, illErr: String?, breathErr: String?, stressErr: String?
         var breathing: [String: Breathing] = [:]
+        var stress: DaytimeStress?
 
         var stageStarted = ProcessInfo.processInfo.systemUptime
         func stageFinished(_ stage: String) {
@@ -214,12 +216,14 @@ enum Core {
         }
         if sleepPending.isEmpty,
            let rAct = ActivityModel.cachedRun(profile: profile, storeDigest: storeDigest),
-           let rIll = IllnessModel.cachedRun(profile: profile, storeDigest: storeDigest) {
+           let rIll = IllnessModel.cachedRun(profile: profile, storeDigest: storeDigest),
+           let rStress = StressModel.cachedRun(storeDigest: storeDigest) {
             s.analysis_digest = storeDigest
             s.analysis_version = ModelCacheStore.version
             workouts = rAct.sessions; actErr = rAct.error
             illness = rIll.result; illErr = rIll.error
             breathing = BreathingModel.cached(nights: base.nights)
+            stress = rStress.result; stressErr = rStress.error
             dlog("models", "store unchanged since the last complete pass; event read skipped")
             stageFinished("cached")
             if AnalysisRun.cancelled { return previous ?? base }
@@ -265,10 +269,15 @@ enum Core {
                 let rBreath = BreathingModel.run(nights: base.nights, events: events, clock: clock)
                 breathing = rBreath.results; breathErr = rBreath.error
                 stageFinished("breathing")
+                if AnalysisRun.cancelled { return previous ?? base }
+                progress("Analyzing daytime stress")
+                let rStress = StressModel.run(events: events, clock: clock, knownDigest: storeDigest)
+                stress = rStress.result; stressErr = rStress.error
+                stageFinished("stress")
             } else if let readErr {
                 // The shared read failed: every event-fed model is unavailable this
                 // pass. Surface one error; the publish below falls back to `previous`.
-                sleepErr = readErr; actErr = readErr; illErr = readErr
+                sleepErr = readErr; actErr = readErr; illErr = readErr; stressErr = readErr
             }
         }
         if AnalysisRun.cancelled { return previous ?? base }
@@ -297,8 +306,9 @@ enum Core {
         // produced nothing (interrupted, model missing) falls back to the last result.
         s.workouts = (actErr == nil || !workouts.isEmpty) ? workouts : (previous?.workouts ?? workouts)
         s.illness = (illErr == nil || illness != nil) ? illness : previous?.illness
+        s.stress = (stressErr == nil || stress != nil) ? stress : previous?.stress
         var seen = Set<String>()
-        s.modelErrors = [sleepErr, cvaErr, actErr, illErr, breathErr].compactMap { $0 }
+        s.modelErrors = [sleepErr, cvaErr, actErr, illErr, breathErr, stressErr].compactMap { $0 }
             .filter { seen.insert($0).inserted }
         for error in s.modelErrors { dlog("models", "failed: \(error)") }
         return s
