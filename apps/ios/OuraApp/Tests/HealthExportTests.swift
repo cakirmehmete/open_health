@@ -121,4 +121,14 @@ final class HealthExportTests: XCTestCase {
         XCTAssertEqual(HealthExport.sleepStages(night)?.estimated, false)
         XCTAssertNil(HealthExport.sleepStages(NightRow(ymd: "2026-10-10", start_ds: 100, start: "23:00", end: "07:00")))
     }
+
+    func testEstimatedStagesOnlyClaimAsleepOrAwake() {
+        let stages = [4, 4, 2, 1, 1, 3, 0, 2, 4]
+        let measured = HealthExport.sleepRuns(stages, estimated: false)
+        XCTAssertEqual(measured.map(\.value), [.awake, .asleepCore, .asleepDeep, .asleepREM, .asleepCore, .awake])
+        let estimated = HealthExport.sleepRuns(stages, estimated: true)
+        XCTAssertEqual(estimated.map(\.value), [.awake, .asleepUnspecified, .asleepUnspecified, .awake])
+        XCTAssertEqual(estimated.map(\.from), [0, 2, 7, 8])
+        XCTAssertEqual(estimated.map(\.to), [2, 6, 8, 9])
+    }
 }

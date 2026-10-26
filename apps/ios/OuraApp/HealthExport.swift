@@ -567,28 +567,42 @@ final class HealthExport: ObservableObject {
                                     start: start, end: end, metadata: Self.meta("sleep.inbed.\(key)")))
         guard let (stages, estimated) = Self.sleepStages(night) else { return out }
         let epoch = end.timeIntervalSince(start) / Double(stages.count)
-        var i = 0
-        while i < stages.count {
-            let code = stages[i]
-            if !(1...4).contains(code) { i += 1; continue }
-            var j = i + 1
-            while j < stages.count, stages[j] == code { j += 1 }
-            let value: HKCategoryValueSleepAnalysis
-            switch code {
-            case 1: value = .asleepDeep
-            case 2: value = .asleepCore
-            case 3: value = .asleepREM
-            default: value = .awake
-            }
-            let a = start.addingTimeInterval(Double(i) * epoch)
-            let b = start.addingTimeInterval(Double(j) * epoch)
-            var metadata = Self.meta("sleep.\(key).\(i).\(j).\(code)")
+        let runs = Self.sleepRuns(stages, estimated: estimated)
+        dlog("health", "night \(key): \(runs.count) sleep runs\(estimated ? " (estimated, asleep/awake only)" : "")")
+        for run in runs {
+            let a = start.addingTimeInterval(Double(run.from) * epoch)
+            let b = start.addingTimeInterval(Double(run.to) * epoch)
+            var metadata = Self.meta("sleep.\(key).\(run.from).\(run.to).\(run.value.rawValue)")
             if estimated { metadata["OpenOuraStaging"] = "estimate" }
-            out.append(HKCategorySample(type: type, value: value.rawValue, start: a, end: max(b, a.addingTimeInterval(1)),
+            out.append(HKCategorySample(type: type, value: run.value.rawValue, start: a, end: max(b, a.addingTimeInterval(1)),
                                         metadata: metadata))
-            i = j
         }
         return out
+    }
+
+    /// Consecutive epochs of one Health sleep value. A measured hypnogram keeps its
+    /// stages; an estimated one only claims asleep vs awake, the part HR and motion
+    /// can tell apart, so readers don't score deep/REM that was never measured.
+    static func sleepRuns(_ stages: [Int], estimated: Bool) -> [(from: Int, to: Int, value: HKCategoryValueSleepAnalysis)] {
+        func value(_ code: Int) -> HKCategoryValueSleepAnalysis? {
+            switch code {
+            case 1: return estimated ? .asleepUnspecified : .asleepDeep
+            case 2: return estimated ? .asleepUnspecified : .asleepCore
+            case 3: return estimated ? .asleepUnspecified : .asleepREM
+            case 4: return .awake
+            default: return nil
+            }
+        }
+        var runs: [(from: Int, to: Int, value: HKCategoryValueSleepAnalysis)] = []
+        var i = 0
+        while i < stages.count {
+            guard let v = value(stages[i]) else { i += 1; continue }
+            var j = i + 1
+            while j < stages.count, value(stages[j]) == v { j += 1 }
+            runs.append((i, j, v))
+            i = j
+        }
+        return runs
     }
 
     /// Sample construction is separate from HealthKit authorization and writes.
