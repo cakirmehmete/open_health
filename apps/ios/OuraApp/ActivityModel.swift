@@ -426,7 +426,7 @@ enum ActivityModel {
             step.ts.append(Int64((row.unixMinute * 60_000).rounded())); step.values.append(contentsOf: row.values)
         }
         var hr = slice(inputs.hr.flat, columns: 2, keep: 1)
-        var hrPairs = hr.values.flatMap { [$0, 0] }
+        var hrPairs: [Float] = hr.values.flatMap { [$0, 0] }
         var temp = slice(inputs.temp.flat, columns: 2, keep: 1)
         var demoV = demo
         var details: [Float] = [activityId, -1]
