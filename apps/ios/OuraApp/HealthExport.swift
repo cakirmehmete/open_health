@@ -48,6 +48,8 @@ final class HealthExport: ObservableObject {
         if let t = HKObjectType.quantityType(forIdentifier: .distanceWalkingRunning) { types.insert(t) }
         if let t = HKObjectType.quantityType(forIdentifier: .oxygenSaturation) { types.insert(t) }
         if let t = HKObjectType.quantityType(forIdentifier: .respiratoryRate) { types.insert(t) }
+        if let t = HKObjectType.quantityType(forIdentifier: .basalEnergyBurned) { types.insert(t) }
+        if let t = HKObjectType.quantityType(forIdentifier: .vo2Max) { types.insert(t) }
         return types
     }
 
@@ -294,7 +296,9 @@ final class HealthExport: ObservableObject {
         // Force one reconciliation after upgrading from the mislabeled SDNN
         // writer, and another when the OS first supports the proper RMSSD type.
         var parts = ["hrv-rmssd-v1:\(ringHRVType?.identifier ?? "unavailable")"]
-        parts.append("ids-v2")
+        // Daytime HR comes from the event table, not the summary, so let an
+        // otherwise unchanged summary still reconcile once per hour.
+        parts.append("ids-v2:\(Int(Date().timeIntervalSince1970 / 3600)):\(s.fitness?.vo2max ?? 0)")
         parts.append(contentsOf: s.workouts.filter { $0.isWorkout >= 0.5 }.map(\.id).sorted())
         for n in s.nights {
             let st = n.hypnogram ?? []
@@ -312,7 +316,40 @@ final class HealthExport: ObservableObject {
         for night in s.nights { out.append(contentsOf: sleepSamples(night)) }
         for night in s.nights { out.append(contentsOf: Self.heartSamples(night, canShare: canShare)) }
         out.append(contentsOf: dailySamples(s.activity_daily))
+        out.append(contentsOf: daytimeHeartSamples(nights: s.nights))
+        out.append(contentsOf: fitnessSamples(s.fitness))
         return out
+    }
+
+    /// One sample per hour the ring logged beats outside sleep, at that hour's
+    /// median (outlier beats would otherwise read as peaks). Night hours are left to
+    /// `heartSamples`, which writes the sleep series at a finer step.
+    private func daytimeHeartSamples(nights: [NightRow]) -> [HKObject] {
+        guard let type = HKObjectType.quantityType(forIdentifier: .heartRate), canShare(type) else { return [] }
+        let hourly = HourlyHR.load(days: 3)
+        if let error = hourly.error { dlog("health", "hourly HR unavailable: \(error)"); return [] }
+        let asleep = nights.compactMap(Self.nightInterval)
+        let unit = HKUnit.count().unitDivided(by: .minute())
+        return hourly.bars.compactMap { bar -> HKObject? in
+            let start = Date(timeIntervalSince1970: bar.unix)
+            let end = start.addingTimeInterval(3600)
+            guard bar.count > 0, bar.median > 20, bar.median < 220,
+                  !asleep.contains(where: { start < $0.1 && end > $0.0 }) else { return nil }
+            return HKQuantitySample(type: type, quantity: HKQuantity(unit: unit, doubleValue: bar.median),
+                                    start: start, end: end,
+                                    metadata: Self.meta("hrh.\(Int(bar.unix)).\(Int(bar.median.rounded()))"))
+        }
+    }
+
+    /// The ring-derived VO2 max estimate, stamped on the day it was computed.
+    private func fitnessSamples(_ fitness: Fitness?) -> [HKObject] {
+        guard let type = HKObjectType.quantityType(forIdentifier: .vo2Max), canShare(type),
+              let vo2 = fitness?.vo2max, vo2 > 10, vo2 < 90 else { return [] }
+        let day = Calendar.current.startOfDay(for: Date())
+        let unit = HKUnit(from: "ml/kg*min")
+        return [HKQuantitySample(type: type, quantity: HKQuantity(unit: unit, doubleValue: vo2),
+                                 start: day, end: day,
+                                 metadata: Self.meta("vo2.\(Int(day.timeIntervalSince1970)).\(Int((vo2 * 10).rounded()))"))]
     }
 
     private static func meta(_ id: String) -> [String: Any] {
@@ -475,6 +512,12 @@ final class HealthExport: ObservableObject {
                 let q = HKQuantity(unit: .kilocalorie(), doubleValue: kcal)
                 out.append(HKQuantitySample(type: type, quantity: q, start: start, end: end,
                                             metadata: Self.meta("kcal.\(day).\(Int(kcal.rounded()))")))
+            }
+            if let type = HKObjectType.quantityType(forIdentifier: .basalEnergyBurned), canShare(type),
+               let total = st.total_kcal, let active = st.active_kcal, total > active {
+                let q = HKQuantity(unit: .kilocalorie(), doubleValue: total - active)
+                out.append(HKQuantitySample(type: type, quantity: q, start: start, end: end,
+                                            metadata: Self.meta("basal.\(day).\(Int((total - active).rounded()))")))
             }
             if let type = HKObjectType.quantityType(forIdentifier: .distanceWalkingRunning), canShare(type),
                let metres = st.distance_m, metres > 0 {

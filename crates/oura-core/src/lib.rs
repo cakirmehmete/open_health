@@ -435,6 +435,33 @@ impl Transport for FfiTransport {
     }
 }
 
+/// Features the ring measures on its own once set to automatic: daytime and
+/// resting HR and SpO2 (the stock set), plus exercise HR and the step-motion
+/// stream (`REAL_STEPS`, 0x0b), which the official app gates behind a server
+/// flag. See open_oura docs/ring-features.md.
+const MEASUREMENT_FEATURES: [(u8, &str); 5] = [
+    (oura_protocol::protocol::feature::DAYTIME_HR, "daytime_hr"),
+    (oura_protocol::protocol::feature::RESTING_HR, "resting_hr"),
+    (oura_protocol::protocol::feature::SPO2, "spo2"),
+    (oura_protocol::protocol::feature::EXERCISE_HR, "exercise_hr"),
+    (0x0b, "real_steps"),
+];
+
+async fn ensure_measurement(client: &OuraClient<FfiTransport>, progress: &dyn SyncProgressListener) {
+    use oura_protocol::protocol::feature_mode::AUTOMATIC;
+    for (id, name) in MEASUREMENT_FEATURES {
+        let on = matches!(client.feature_status(id).await, Ok(s) if s.mode == AUTOMATIC);
+        if on {
+            continue;
+        }
+        let note = match client.set_feature_mode(id, AUTOMATIC).await {
+            Ok(()) => format!("enabled {name}"),
+            Err(e) => format!("{name} not enabled: {e}"),
+        };
+        progress.on_progress(note, 0, 0);
+    }
+}
+
 /// Drain one incremental range, inserting each event before checkpointing its batch.
 /// Returning `false` from either callback makes oura-link withhold the ring ACK, so a
 /// database failure can never advance the cursor past data that was not persisted.
@@ -731,6 +758,11 @@ impl RingSession {
             .setup_app_stream()
             .await
             .map_err(|e| fail(e.to_string()))?;
+        // A factory reset leaves measurement off, and only the official app's onboarding
+        // turns it back on. Re-assert it every sync: one status read per feature, and a
+        // write only when the ring has drifted. A refusal is not a sync failure.
+        progress.on_progress("features".into(), 0, 0);
+        ensure_measurement(&client, progress.as_ref()).await;
         // Push the phone's clock to the ring so this boot logs a `time_sync` anchor.
         // Without one, a rebooted ring's nights have no bridge to wall-clock time:
         // `time_sync` is the only wall-clock anchor in the event stream, and it is
