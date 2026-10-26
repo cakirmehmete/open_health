@@ -41,9 +41,13 @@ Of the ~26 newest-version models, most are blocked on a signal we can't get:
 
 Runners and the iOS app find a model by **family**, not exact file name: each names
 the version its inputs were validated on and falls back to the newest local version
-(`_common.resolve_model`, iOS `ModelFiles.find`), reporting the version it ran. So a
-newer APK's files (`cva_2_1_5`, `automatic_activity_detection_3_1_15`) work without
-renames, but check the outputs against the validated version before trusting them.
+whose `forward()` takes the same inputs (`_common.resolve_model` with `oldest`/`newest`,
+iOS `ModelFiles.known`), reporting the version it ran. Checked against the schemas:
+`cva_2_1_5` stands in for 2.1.0 (same `(x, demographics)`), `cva_1_3_0` does not (4
+inputs); AAD 3.1.12 stands in for 3.1.11, but 3.1.15 replaced the three scalar
+thresholds with `global_settings`/`user_settings`/`activity_settings` tensors and fails
+validation (error 18) with the 3.1.11 inputs, so it is excluded until a runner builds
+those tensors.
 `inspect_models.py` and `export_mobile.py` discover every file in `notes/models/`
 (newest per family; `inspect_models.py --all-versions` for all), and
 `inspect_models.py --json` is a weight-free schema dump that is safe to share.

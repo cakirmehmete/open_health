@@ -24,7 +24,7 @@ from epoch_time import build_epochs, is_dated, make_unix_s
 from respiratory_rate import respiratory_rate
 
 REPO = Path(__file__).resolve().parent.parent
-MODEL = str(resolve_model(REPO, "illness_detection", "0_5_1"))
+MODEL = str(resolve_model(REPO, "illness_detection", "0_5_1", oldest="0_5_0", newest="0_5_999"))
 
 N_DAYS = 30
 IBI_TAGS = {0x44, 0x60, 0x71}

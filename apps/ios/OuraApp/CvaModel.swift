@@ -10,7 +10,7 @@ enum CvaModel {
     private static let SEG_LEN = 1500
     private static let GAP_DS: Int64 = 20  // >2 s splits two PPG measurements
 
-    private static var modelName: String? { ModelFiles.find("cva", validated: "2_1_0")?.name }
+    private static var modelName: String? { ModelFiles.find("cva")?.name }
 
     struct Result: Codable { let vascularAge: Double; let pwv: Double; let segments: Int }
 
@@ -18,7 +18,7 @@ enum CvaModel {
     // `error` only for genuine failures (model missing / inference failed despite data).
     static func run(sex: String, age: Double, heightM: Double, weightKg: Double, ringSize: Double) -> (result: Result?, error: String?) {
         let dbPath = DB.readPath()
-        guard let modelPath = ModelFiles.find("cva", validated: "2_1_0")?.path
+        guard let modelPath = ModelFiles.find("cva")?.path
         else { return (nil, "cardiovascular model file missing from the app bundle") }
 
         let sexVal: Float = sex.uppercased() == "F" ? -1 : (sex.uppercased() == "O" ? 0 : 1)

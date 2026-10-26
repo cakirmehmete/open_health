@@ -23,8 +23,9 @@ from epoch_time import build_epochs, is_dated, make_unix_s
 warnings.filterwarnings("ignore", message=".*searchsorted.*")
 
 REPO = Path(__file__).resolve().parent.parent
-MODEL = resolve_model(REPO, "automatic_activity_detection", "3_1_11")
-STEP_MODEL = resolve_model(REPO, "steps_motion_decoder", "2_0_0")
+# 3.1.15 takes a settings tensor in place of the three scalar thresholds passed below.
+MODEL = resolve_model(REPO, "automatic_activity_detection", "3_1_11", oldest="3_1_0", newest="3_1_12")
+STEP_MODEL = resolve_model(REPO, "steps_motion_decoder", "2_0_0", newest="2_999_0")
 MODEL_VERSION = model_version(MODEL, "automatic_activity_detection")
 
 BEHAVIOR = {

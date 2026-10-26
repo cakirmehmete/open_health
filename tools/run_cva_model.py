@@ -35,7 +35,7 @@ import torch
 from _common import resolve_db, resolve_model
 
 REPO = Path(__file__).resolve().parent.parent
-MODEL = resolve_model(REPO, "cva", "2_1_0")
+MODEL = resolve_model(REPO, "cva", "2_1_0", oldest="2_0_0", newest="2_999_0")  # 1.x takes 4 inputs
 SEG_LEN = 1500          # samples per segment (hard model constant)
 GAP_DS = 20             # >2 s (deciseconds) splits two PPG measurements
 

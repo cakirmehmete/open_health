@@ -217,7 +217,7 @@ struct ModelListView: View {
             Section {
                 ForEach(ModelFiles.known, id: \.family) { model in
                     let all = ModelFiles.bundled(model.family)
-                    let picked = ModelFiles.find(model.family, validated: model.validated)
+                    let picked = ModelFiles.find(model.family)
                     LabeledContent(model.title) {
                         VStack(alignment: .trailing, spacing: 2) {
                             Text(picked.map { "v" + ModelFiles.display($0.version) } ?? "not bundled")
@@ -226,7 +226,10 @@ struct ModelListView: View {
                                 Text("tested on v\(ModelFiles.display(model.validated))")
                                     .font(.caption2).foregroundStyle(.orange)
                             }
-                            if all.count > 1 {
+                            if picked == nil, let other = all.first {
+                                Text("v\(ModelFiles.display(other.version)) bundled, needs different inputs")
+                                    .font(.caption2).foregroundStyle(.orange)
+                            } else if all.count > 1 {
                                 Text("\(all.count) versions bundled").font(.caption2).foregroundStyle(.secondary)
                             }
                         }

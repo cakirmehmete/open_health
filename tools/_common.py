@@ -48,19 +48,24 @@ def model_versions(models_dir, family, ext=".pt"):
     return [p for _, p in sorted(found, reverse=True)]
 
 
-def resolve_model(repo, family, validated, ext=".pt"):
+def resolve_model(repo, family, validated, oldest=None, newest=None, ext=".pt"):
     """The model file for ``family``: the ``validated`` version (the one the runner's
-    inputs were checked against) when present, else the newest local version. When
-    none exists, returns the validated path so the caller's "not found" names it.
+    inputs were checked against) when present, else the newest local version within
+    ``oldest``..``newest`` (the versions whose forward() takes the same inputs; e.g.
+    AAD 3.1.15 swapped its threshold scalars for a settings tensor). When none
+    exists, returns the validated path so the caller's "not found" names it.
     """
     want = f"{family}_{validated}{ext}"
     models_dir = resolve_models_dir(repo, want)
     if (models_dir / want).is_file():
         return models_dir / want
+    key = lambda v: tuple(int(p) for p in v.split("_"))
+    lo = key(oldest or validated)
+    hi = key(newest) if newest else (float("inf"),)
     for d in (models_dir, repo / "notes" / "models", repo.parent / "open_oura" / "notes" / "models"):
-        versions = model_versions(d, family, ext) if d.is_dir() else []
-        if versions:
-            return versions[0]
+        for path in (model_versions(d, family, ext) if d.is_dir() else []):
+            if lo <= key(path.stem[len(family) + 1:]) <= hi:
+                return path
     return models_dir / want
 
 

@@ -198,7 +198,7 @@ struct InsightsView: View {
                         .font(.caption).foregroundStyle(Ink.dim)
                 }
             }
-        } else if ModelFiles.find("cva", validated: "2_1_0") != nil {
+        } else if ModelFiles.find("cva") != nil {
             InsightCard(icon: "heart.text.square", title: "Cardiovascular age", tone: .neutral, value: "–", unit: "") {
                 Text("Needs the ring's cva_ppg readings.").font(.caption).foregroundStyle(Ink.dim)
             }

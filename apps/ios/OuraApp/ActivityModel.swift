@@ -50,7 +50,7 @@ enum ActivityModel {
     /// changes, so cached results — cached failures above all — are recomputed once
     /// instead of being trusted for inputs the new pipeline would build differently.
     private static let pipelineVersion = 2
-    private static var modelName: String? { ModelFiles.find("automatic_activity_detection", validated: "3_1_11")?.name }
+    private static var modelName: String? { ModelFiles.find("automatic_activity_detection")?.name }
 
     /// The last complete pass's result when the store is unchanged since (same rows,
     /// same clock anchors) — no event read needed. `storeDigest` is `Events.digest()`.
@@ -72,7 +72,7 @@ enum ActivityModel {
                     knownDigest: String? = nil,
                     progress: @escaping @Sendable (String) -> Void = { _ in },
                     inputsSink: (([String: Any]) -> Void)? = nil) -> (sessions: [WorkoutSession], error: String?) {
-        guard let aadPath = ModelFiles.find("automatic_activity_detection", validated: "3_1_11")?.path
+        guard let aadPath = ModelFiles.find("automatic_activity_detection")?.path
         else { return ([], "activity model file missing from the app bundle") }
 
         guard !events.isEmpty else { return ([], onlyDay == nil ? nil : "No activity data is saved for this day.") }
@@ -402,7 +402,7 @@ enum ActivityModel {
     /// as one tensor and jetsam-killed the app.
     private static func decodeStepPackets(_ packets: [TimedRow]) throws -> [TimedRow] {
         guard !packets.isEmpty else { return [] }
-        guard let modelPath = ModelFiles.find("steps_motion_decoder", validated: "2_0_0")?.path
+        guard let modelPath = ModelFiles.find("steps_motion_decoder")?.path
         else { throw InferenceFailure("step decoder model file is missing from the app bundle") }
         let chunk = 4096
         let overlap = 24
