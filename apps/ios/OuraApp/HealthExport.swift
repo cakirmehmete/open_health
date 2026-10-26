@@ -121,6 +121,27 @@ final class HealthExport: ObservableObject {
         }
     }
 
+    /// The iPhone writes its own step count to Health through the day; observing it
+    /// is a free, roughly hourly wake-up for a background sync. Our own step writes
+    /// trigger it too, which BackgroundSync's minimum gap absorbs.
+    static var wakeTypes: Set<HKObjectType> {
+        HKObjectType.quantityType(forIdentifier: .stepCount).map { [$0] } ?? []
+    }
+
+    /// Must be registered at every launch, background ones included.
+    func observeForWakeUps(_ onUpdate: @escaping (@escaping () -> Void) -> Void) {
+        guard enabled, HKHealthStore.isHealthDataAvailable(),
+              let steps = HKObjectType.quantityType(forIdentifier: .stepCount) else { return }
+        let query = HKObserverQuery(sampleType: steps, predicate: nil) { _, completion, error in
+            if let error { dlog("health", "step observer: \(error)"); completion(); return }
+            onUpdate(completion)
+        }
+        store.execute(query)
+        store.enableBackgroundDelivery(for: steps, frequency: .hourly) { ok, error in
+            if !ok { dlog("health", "background delivery off: \(error.map { String(describing: $0) } ?? "unknown")") }
+        }
+    }
+
     func removeExportedSamples() {
         queue.async { [weak self] in
             guard let self else { return }
@@ -151,7 +172,7 @@ final class HealthExport: ObservableObject {
                                       userInfo: [NSLocalizedDescriptionKey: "Apple Health is unavailable on this device."]))
             return
         }
-        store.requestAuthorization(toShare: Self.shareTypes, read: []) { ok, error in
+        store.requestAuthorization(toShare: Self.shareTypes, read: Self.wakeTypes) { ok, error in
             completion(ok, error)
         }
     }

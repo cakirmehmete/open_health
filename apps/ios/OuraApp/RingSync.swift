@@ -487,6 +487,7 @@ final class RingSync: ObservableObject {
     private func rememberPeripheral(_ id: UUID?) {
         guard let id else { return }
         UserDefaults.standard.set(id.uuidString, forKey: Self.preferredPeripheralKey)
+        RingWatcher.shared.refresh()
     }
 
     /// Connect, wire the inbound-frame pump, and run a full sync into the writable DB.

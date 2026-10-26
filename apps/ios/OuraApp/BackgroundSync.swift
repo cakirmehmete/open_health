@@ -2,13 +2,15 @@ import BackgroundTasks
 import UIKit
 
 /// Keeps ring → Apple Health flowing without the app on screen, so a reader such
-/// as Bevel sees fresh data. iOS decides when these tasks run (more often for apps
-/// it sees used, never after the app is swiped away from the switcher); each run
-/// drains the ring, rebuilds the summary, and exports it to Health.
+/// as Bevel sees fresh data. Nothing here runs after the app is swiped away from
+/// the switcher. Each run drains the ring, rebuilds the summary, and exports it.
 ///
-/// - refresh: short, frequent slots. Enough for an incremental drain of an hour
-///   or two of history; a longer drain checkpoints and resumes next time.
-/// - processing: longer slots, typically while the phone sits idle overnight.
+/// What wakes us, most frequent first:
+/// - RingWatcher: the ring (re)connecting to its standing link.
+/// - Health background delivery: the iPhone's own step count updating (≈ hourly).
+/// - BGTasks as the backstop. refresh: short slots, enough for an incremental
+///   drain (a longer one checkpoints and resumes); processing: longer slots,
+///   typically while the phone sits idle overnight.
 ///
 /// Health refuses writes while the phone is locked. A run that syncs the ring but
 /// can't export leaves the fingerprint unsaved, so the next unlocked run retries.
@@ -18,6 +20,9 @@ enum BackgroundSync {
     static let processingID = "md.thomas.openoura.sync"
     /// Ask to run about this often. iOS treats it as a floor, not a schedule.
     static let interval: TimeInterval = 45 * 60
+    /// Event-driven wakes closer than this to the last good sync are ignored: each
+    /// sync costs ring battery, and a few minutes of data isn't worth it.
+    static let minimumGap: TimeInterval = 15 * 60
 
     /// Registration must finish before the app finishes launching.
     static func register() {
@@ -39,6 +44,31 @@ enum BackgroundSync {
         for request in [refresh, processing] as [BGTaskRequest] {
             do { try BGTaskScheduler.shared.submit(request) }
             catch { dlog("bg", "submit \(request.identifier) failed: \(error)") }
+        }
+    }
+
+    /// An event-driven cue (ring connect, Health update). The foreground UI runs
+    /// its own sync, so this only acts while the app is in the background, inside
+    /// the ~30 s of background time iOS grants; Bluetooth traffic during the drain
+    /// keeps the app awake past that under the bluetooth-central mode.
+    static func wake(reason: String, completion: (() -> Void)? = nil) {
+        let recent = RingSync.shared.lastSuccessfulSyncAt.map { Date().timeIntervalSince($0) < minimumGap } ?? false
+        guard UIApplication.shared.applicationState != .active, !recent,
+              !WorkCoordinator.shared.backgroundSession else {
+            completion?()
+            return
+        }
+        var task = UIBackgroundTaskIdentifier.invalid
+        task = UIApplication.shared.beginBackgroundTask(withName: "ring-wake") {
+            RingSync.shared.pause()
+            WorkCoordinator.shared.invalidateAnalysis()
+            UIApplication.shared.endBackgroundTask(task)
+            task = .invalid
+        }
+        Task { @MainActor in
+            _ = await run(reason: reason)
+            if task != .invalid { UIApplication.shared.endBackgroundTask(task); task = .invalid }
+            completion?()
         }
     }
 

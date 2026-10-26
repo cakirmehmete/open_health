@@ -1279,6 +1279,10 @@ struct OuraApp: App {
         DiagStore.shared.bootstrap()
         Keychain.migrateAccessibility()
         BackgroundSync.register()
+        RingWatcher.shared.start()
+        HealthExport.shared.observeForWakeUps { done in
+            Task { @MainActor in BackgroundSync.wake(reason: "health steps", completion: done) }
+        }
     }
     var body: some Scene { WindowGroup { RootView() } }
 }

@@ -174,6 +174,15 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
     }
 
     private func startScan() {
+        // RingWatcher usually holds a link to the ring already, and a connected ring
+        // stops advertising, so a scan would never see it. Join that link instead.
+        if let id = preferredPeripheralID, !excludedPeripheralIDs.contains(id),
+           let linked = central.retrieveConnectedPeripherals(withServices: [RingUUID.service])
+               .first(where: { $0.identifier == id }) {
+            dlog("ble", "ring already linked id=\(id.uuidString.suffix(12)); connecting without a scan")
+            attach(linked)
+            return
+        }
         scanStartedAt = Date()
         lock.lock(); stage = "scanning; no ring advertisement seen yet"; lock.unlock()
         dlog("ble", "scanning (unfiltered, allow duplicates); matching service \(RingUUID.service)")
@@ -317,6 +326,10 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
         guard self.peripheral == nil else { return }
         central.stopScan()
         dlog("ble", "ring matched id=\(peripheral.identifier.uuidString.suffix(12)) rssi=\(RSSI) otherDevices=\(otherDevices.count); connecting")
+        attach(peripheral)
+    }
+
+    private func attach(_ peripheral: CBPeripheral) {
         lock.lock()
         stage = "GATT-connecting to the discovered ring"
         _connectedPeripheralID = peripheral.identifier
