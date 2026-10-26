@@ -435,7 +435,7 @@ final class HealthExport: ObservableObject {
         var raw: [(Int64, Int, Int)] = []
         var last: Int64 = 0
         for (t, ibis, amps) in events {
-            let (beats, l) = SleepStaging.expandIbiEvent(ibis, amps, t, last)
+            let (beats, l) = NssaInputs.expandIbiEvent(ibis, amps, t, last)
             raw += beats; last = l
         }
         guard !raw.isEmpty else { return [] }
