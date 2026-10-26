@@ -426,18 +426,31 @@ enum ActivityModel {
             step.ts.append(Int64((row.unixMinute * 60_000).rounded())); step.values.append(contentsOf: row.values)
         }
         var hr = slice(inputs.hr.flat, columns: 2, keep: 1)
-        var hrPairs: [Float] = hr.values.flatMap { [$0, 0] }
+        // EE's hr is [bpm, unused]; a plain loop keeps the type checker off flatMap's overloads.
+        var hrPairs: [Float] = []
+        hrPairs.reserveCapacity(hr.values.count * 2)
+        for bpm in hr.values {
+            hrPairs.append(bpm)
+            hrPairs.append(0)
+        }
         var temp = slice(inputs.temp.flat, columns: 2, keep: 1)
         var demoV = demo
         var details: [Float] = [activityId, -1]
         var out = [Double](repeating: .nan, count: 5)
-        let status = oura_energy(modelPath, &demoV, &details,
-                                 Int64((fromMinute * 60_000).rounded()), Int64((toMinute * 60_000).rounded()),
-                                 &met.ts, &met.values, Int32(met.ts.count),
-                                 &motion.ts, &motion.values, Int32(motion.ts.count),
-                                 &step.ts, &step.values, Int32(step.ts.count),
-                                 &hr.ts, &hrPairs, Int32(hr.ts.count),
-                                 &temp.ts, &temp.values, Int32(temp.ts.count), &out)
+        // Typed arguments: the long inline-converted call timed out the type checker on Xcode 16.
+        let startMs: Int64 = Int64((fromMinute * 60_000).rounded())
+        let endMs: Int64 = Int64((toMinute * 60_000).rounded())
+        let nMet: Int32 = Int32(met.ts.count)
+        let nMotion: Int32 = Int32(motion.ts.count)
+        let nStep: Int32 = Int32(step.ts.count)
+        let nHr: Int32 = Int32(hr.ts.count)
+        let nTemp: Int32 = Int32(temp.ts.count)
+        let status: Int32 = oura_energy(modelPath, &demoV, &details, startMs, endMs,
+                                        &met.ts, &met.values, nMet,
+                                        &motion.ts, &motion.values, nMotion,
+                                        &step.ts, &step.values, nStep,
+                                        &hr.ts, &hrPairs, nHr,
+                                        &temp.ts, &temp.values, nTemp, &out)
         guard status == 0, out[0].isFinite, out[0] >= 0 else {
             dlog("models", "energy workout id=\(Int(activityId)) failed (status \(status))")
             return nil
