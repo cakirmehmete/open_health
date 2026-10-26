@@ -46,6 +46,8 @@ final class HealthExport: ObservableObject {
         if let t = HKObjectType.quantityType(forIdentifier: .stepCount) { types.insert(t) }
         if let t = HKObjectType.quantityType(forIdentifier: .activeEnergyBurned) { types.insert(t) }
         if let t = HKObjectType.quantityType(forIdentifier: .distanceWalkingRunning) { types.insert(t) }
+        if let t = HKObjectType.quantityType(forIdentifier: .oxygenSaturation) { types.insert(t) }
+        if let t = HKObjectType.quantityType(forIdentifier: .respiratoryRate) { types.insert(t) }
         return types
     }
 
@@ -103,6 +105,22 @@ final class HealthExport: ObservableObject {
         }
     }
 
+    /// `push` for callers that must know when the write lands (a background task
+    /// has to report completion). False when Health refused it, e.g. while locked.
+    func pushAndWait(_ summary: Summary) async -> Bool {
+        guard enabled, summary.error == nil, HKHealthStore.isHealthDataAvailable() else { return false }
+        let fp = Self.fingerprint(summary)
+        if fp == UserDefaults.standard.string(forKey: Self.fingerprintKey) { return true }
+        return await withCheckedContinuation { completion in
+            queue.async { [weak self] in
+                guard let self, !self.pushing else { completion.resume(returning: false); return }
+                self.pushing = true
+                defer { self.pushing = false }
+                completion.resume(returning: self.authorizeAndWrite(summary, fingerprint: fp))
+            }
+        }
+    }
+
     func removeExportedSamples() {
         queue.async { [weak self] in
             guard let self else { return }
@@ -138,7 +156,8 @@ final class HealthExport: ObservableObject {
         }
     }
 
-    private func authorizeAndWrite(_ summary: Summary, fingerprint fp: String) {
+    @discardableResult
+    private func authorizeAndWrite(_ summary: Summary, fingerprint fp: String) -> Bool {
         let group = DispatchGroup()
         var authError: Error?
         var authOK = false
@@ -151,11 +170,11 @@ final class HealthExport: ObservableObject {
         group.wait()
         if let authError {
             DispatchQueue.main.async { self.status = authError.localizedDescription }
-            return
+            return false
         }
         guard authOK else {
             DispatchQueue.main.async { self.status = "Apple Health write access was not granted." }
-            return
+            return false
         }
 
         let samples = buildSamples(summary)
@@ -179,12 +198,12 @@ final class HealthExport: ObservableObject {
         collect.wait()
         if let queryError {
             DispatchQueue.main.async { self.status = queryError.localizedDescription }
-            return
+            return false
         }
         // Even a now-empty export must reconcile legacy HRV records.
         if samples.isEmpty, workouts.isEmpty, ours.isEmpty {
             DispatchQueue.main.async { self.status = "Nothing to export. Check Apple Health permissions for Open Oura." }
-            return
+            return false
         }
 
         let wantedIDs = Set(samples.compactMap(Self.syncID) + workouts.map(\.syncID))
@@ -236,6 +255,7 @@ final class HealthExport: ObservableObject {
                 dlog("health", self.status)
             }
         }
+        return writeError == nil
     }
 
     private func allOurs(_ type: HKSampleType, completion: @escaping ([HKObject], Error?) -> Void) {
@@ -253,10 +273,11 @@ final class HealthExport: ObservableObject {
         // Force one reconciliation after upgrading from the mislabeled SDNN
         // writer, and another when the OS first supports the proper RMSSD type.
         var parts = ["hrv-rmssd-v1:\(ringHRVType?.identifier ?? "unavailable")"]
+        parts.append("ids-v2")
         parts.append(contentsOf: s.workouts.filter { $0.isWorkout >= 0.5 }.map(\.id).sorted())
         for n in s.nights {
             let st = n.hypnogram ?? []
-            parts.append("n\(n.start_ds ?? 0):\(st.count):\(st.reduce(0, +)):\(n.hrv_ms ?? 0):\(n.rhr ?? 0)")
+            parts.append("n\(n.start_ds ?? 0):\(st.count):\(st.reduce(0, +)):\(n.hrv_ms ?? 0):\(n.rhr ?? 0):\(n.spo2_mean ?? 0):\(n.breath_rate ?? 0):\(n.series?.hr.count ?? 0)")
         }
         for day in s.activity_daily.keys.sorted() {
             let st = s.activity_daily[day]!
@@ -357,7 +378,7 @@ final class HealthExport: ObservableObject {
             let a = start.addingTimeInterval(Double(i) * epoch)
             let b = start.addingTimeInterval(Double(j) * epoch)
             out.append(HKCategorySample(type: type, value: value.rawValue, start: a, end: max(b, a.addingTimeInterval(1)),
-                                        metadata: Self.meta("sleep.\(key).\(i).\(j)")))
+                                        metadata: Self.meta("sleep.\(key).\(i).\(j).\(code)")))
             i = j
         }
         return out
@@ -372,13 +393,25 @@ final class HealthExport: ObservableObject {
            canShare(type), let hrv = night.hrv_ms, hrv.isFinite, hrv > 0 {
             let q = HKQuantity(unit: .secondUnit(with: .milli), doubleValue: hrv)
             out.append(HKQuantitySample(type: type, quantity: q, start: end, end: end,
-                                        metadata: meta("hrv.rmssd.\(key)")))
+                                        metadata: meta("hrv.rmssd.\(key).\(Int(hrv.rounded()))")))
         }
         if let type = HKObjectType.quantityType(forIdentifier: .restingHeartRate),
            canShare(type), let rhr = night.rhr, rhr > 0 {
             let q = HKQuantity(unit: HKUnit.count().unitDivided(by: .minute()), doubleValue: rhr)
             out.append(HKQuantitySample(type: type, quantity: q, start: end, end: end,
-                                        metadata: meta("rhr.\(key)")))
+                                        metadata: meta("rhr.\(key).\(Int(rhr.rounded()))")))
+        }
+        if let type = HKObjectType.quantityType(forIdentifier: .oxygenSaturation),
+           canShare(type), let spo2 = night.spo2_mean, spo2 >= 70, spo2 <= 100 {
+            let q = HKQuantity(unit: .percent(), doubleValue: spo2 / 100)
+            out.append(HKQuantitySample(type: type, quantity: q, start: start, end: end,
+                                        metadata: meta("spo2.\(key).\(Int(spo2.rounded()))")))
+        }
+        if let type = HKObjectType.quantityType(forIdentifier: .respiratoryRate),
+           canShare(type), let rate = night.breath_rate, rate > 4, rate < 40 {
+            let q = HKQuantity(unit: HKUnit.count().unitDivided(by: .minute()), doubleValue: rate)
+            out.append(HKQuantitySample(type: type, quantity: q, start: start, end: end,
+                                        metadata: meta("resp.\(key).\(Int((rate * 10).rounded()))")))
         }
         if let type = HKObjectType.quantityType(forIdentifier: .heartRate), canShare(type),
            let series = night.series?.hr, series.count > 1 {
@@ -392,7 +425,7 @@ final class HealthExport: ObservableObject {
                     let t = start.addingTimeInterval(span * Double(i) / Double(series.count - 1))
                     let q = HKQuantity(unit: unit, doubleValue: bpm)
                     out.append(HKQuantitySample(type: type, quantity: q, start: t, end: t,
-                                                metadata: meta("hr.\(key).\(i)")))
+                                                metadata: meta("hr.\(key).\(i).\(Int(bpm.rounded()))")))
                 }
                 i += step
             }
@@ -414,19 +447,19 @@ final class HealthExport: ObservableObject {
                let steps = st.steps, steps > 0 {
                 let q = HKQuantity(unit: .count(), doubleValue: steps)
                 out.append(HKQuantitySample(type: type, quantity: q, start: start, end: end,
-                                            metadata: Self.meta("steps.\(day)")))
+                                            metadata: Self.meta("steps.\(day).\(Int(steps.rounded()))")))
             }
             if let type = HKObjectType.quantityType(forIdentifier: .activeEnergyBurned), canShare(type),
                let kcal = st.active_kcal, kcal > 0 {
                 let q = HKQuantity(unit: .kilocalorie(), doubleValue: kcal)
                 out.append(HKQuantitySample(type: type, quantity: q, start: start, end: end,
-                                            metadata: Self.meta("kcal.\(day)")))
+                                            metadata: Self.meta("kcal.\(day).\(Int(kcal.rounded()))")))
             }
             if let type = HKObjectType.quantityType(forIdentifier: .distanceWalkingRunning), canShare(type),
                let metres = st.distance_m, metres > 0 {
                 let q = HKQuantity(unit: .meter(), doubleValue: metres)
                 out.append(HKQuantitySample(type: type, quantity: q, start: start, end: end,
-                                            metadata: Self.meta("dist.\(day)")))
+                                            metadata: Self.meta("dist.\(day).\(Int(metres.rounded()))")))
             }
         }
         return out

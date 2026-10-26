@@ -40,7 +40,13 @@ final class AnalysisRun: @unchecked Sendable {
 @MainActor
 final class WorkCoordinator {
     static let shared = WorkCoordinator()
-    var available: Bool { UIApplication.shared.applicationState == .active && UIApplication.shared.isProtectedDataAvailable }
+    /// Set while a BGTask owns the process. The ring DB and the auth key are both
+    /// readable after first unlock, so that work may run with the phone locked.
+    var backgroundSession = false
+    var available: Bool {
+        if backgroundSession { return true }
+        return UIApplication.shared.applicationState == .active && UIApplication.shared.isProtectedDataAvailable
+    }
     private var analysis: AnalysisRun?
     private var observers: [NSObjectProtocol] = []
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
@@ -48,7 +54,7 @@ final class WorkCoordinator {
         for name in [UIApplication.didEnterBackgroundNotification, UIApplication.protectedDataWillBecomeUnavailableNotification] {
             observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { _ in
                 Task { @MainActor in
-                    guard let run = self.analysis else { return }
+                    guard let run = self.analysis, !self.backgroundSession else { return }
                     self.beginCleanup()
                     run.cancel()
                 }

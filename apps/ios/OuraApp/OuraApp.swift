@@ -813,7 +813,7 @@ struct RootView: View {
     @State private var isRefreshingSummary = false
     @State private var automaticSyncRequested = false
     @State private var reloadPending = false
-    @StateObject private var ring = RingSync()
+    @StateObject private var ring = RingSync.shared
     @StateObject private var modelProgress = ModelProgress()
     private func f(_ v: Double?, _ fallback: String = "–") -> String {
         v.map { "\(Int($0))" } ?? fallback
@@ -877,6 +877,7 @@ struct RootView: View {
                 requestAutomaticSync()
             } else if phase == .background {
                 WorkCoordinator.shared.invalidateAnalysis()
+                BackgroundSync.schedule()
             }
         }
     }
@@ -1274,6 +1275,10 @@ struct BuildStamp: View {
 
 @main
 struct OuraApp: App {
-    init() { DiagStore.shared.bootstrap() }
+    init() {
+        DiagStore.shared.bootstrap()
+        Keychain.migrateAccessibility()
+        BackgroundSync.register()
+    }
     var body: some Scene { WindowGroup { RootView() } }
 }

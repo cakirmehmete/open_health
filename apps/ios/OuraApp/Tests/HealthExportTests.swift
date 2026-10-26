@@ -16,7 +16,7 @@ final class HealthExportTests: XCTestCase {
         if let expectedType = HealthExport.ringHRVType {
             XCTAssertEqual(hrv?.quantityType, expectedType)
             XCTAssertEqual(hrv?.quantity.doubleValue(for: .secondUnit(with: .milli)), 72)
-            XCTAssertEqual(hrv?.metadata?[HKMetadataKeySyncIdentifier] as? String, "openoura.hrv.rmssd.100")
+            XCTAssertEqual(hrv?.metadata?[HKMetadataKeySyncIdentifier] as? String, "openoura.hrv.rmssd.100.72")
         } else {
             XCTAssertNil(hrv)
         }
@@ -45,6 +45,24 @@ final class HealthExportTests: XCTestCase {
         let untagged = sample(sdnn, nil)
         let otherMetric = sample(rhr, "openoura.hrv.100")
         XCTAssertEqual(HealthExport.legacyHRVSamples([legacy, legitimate, untagged, otherMetric]).map(\.uuid), [legacy.uuid])
+    }
+
+    func testChangedValuesGetNewSyncIdentifiers() {
+        // Reconciliation keys on sync identifiers, so a value that changes between
+        // background syncs (a re-staged night, a revised RHR) must change its ID.
+        var night = NightRow(ymd: "2026-10-10", start_ds: 100, start: "23:00", end: "07:00")
+        night.rhr = 50
+        night.spo2_mean = 96
+        night.breath_rate = 14.2
+        func ids(_ n: NightRow) -> Set<String> {
+            Set(HealthExport.heartSamples(n, canShare: { _ in true })
+                .compactMap { $0.metadata?[HKMetadataKeySyncIdentifier] as? String })
+        }
+        let before = ids(night)
+        XCTAssertTrue(before.contains("openoura.spo2.100.96"))
+        XCTAssertTrue(before.contains("openoura.resp.100.142"))
+        night.rhr = 52
+        XCTAssertNotEqual(before, ids(night))
     }
 
     func testHrvMigrationInvalidatesOldExportFingerprint() {

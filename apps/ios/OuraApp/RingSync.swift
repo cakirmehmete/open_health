@@ -246,7 +246,16 @@ enum Keychain {
         SecItemDelete(base as CFDictionary)
         var add = base
         add[kSecValueData as String] = data
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         SecItemAdd(add as CFDictionary, nil)
+    }
+    /// Keys saved before background sync used the default (unlocked-only) class,
+    /// which a sync in a locked phone's background cannot read. Re-file them once.
+    static func migrateAccessibility() {
+        let base: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                   kSecAttrAccount as String: account]
+        SecItemUpdate(base as CFDictionary,
+                      [kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly] as CFDictionary)
     }
     static func clearKey() {
         SecItemDelete([kSecClass as String: kSecClassGenericPassword,
@@ -309,6 +318,7 @@ final class SyncProgressBridge: SyncProgressListener, @unchecked Sendable {
 /// Orchestrates a sync and exposes progress to the UI.
 @MainActor
 final class RingSync: ObservableObject {
+    static let shared = RingSync()
     @Published var status: String = ""
     @Published var busy = false
     @Published private(set) var exportStatus: String?
@@ -363,7 +373,7 @@ final class RingSync: ObservableObject {
         for name in [UIApplication.didEnterBackgroundNotification, UIApplication.protectedDataWillBecomeUnavailableNotification] {
             lifecycleObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in
-                    guard let self, self.busy else { return }
+                    guard let self, self.busy, !WorkCoordinator.shared.backgroundSession else { return }
                     WorkCoordinator.shared.beginCleanup()
                     self.pause()
                 }

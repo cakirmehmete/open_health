@@ -102,6 +102,7 @@ targets:
       - path: CrashCatch.h
       - path: Diagnostics.swift
       - path: HealthExport.swift
+      - path: BackgroundSync.swift
       - path: ../generated/oura_core.swift
       - path: Assets.xcassets
       # bundled models + data (gitignored local files). oura.db is temporary until the

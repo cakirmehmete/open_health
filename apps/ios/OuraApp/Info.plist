@@ -27,6 +27,13 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>bluetooth-central</string>
+		<string>fetch</string>
+		<string>processing</string>
+	</array>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>md.thomas.openoura.refresh</string>
+		<string>md.thomas.openoura.sync</string>
 	</array>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Open Oura connects to your Oura ring over Bluetooth to read your health data on-device.</string>
