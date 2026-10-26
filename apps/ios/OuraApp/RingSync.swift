@@ -714,7 +714,8 @@ final class RingSync: ObservableObject {
             // BLETransport's notification stream is per-connection.
             let t = BLETransport(nameContains: "Oura",
                                  preferredPeripheralID: preferredPeripheralID,
-                                 excludedPeripheralIDs: excludedPeripherals)
+                                 excludedPeripheralIDs: excludedPeripherals,
+                                 inBackground: UIApplication.shared.applicationState != .active)
             transport = t
             do {
                 try await t.connect()

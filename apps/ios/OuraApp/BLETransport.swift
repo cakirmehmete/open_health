@@ -110,9 +110,14 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
     // of the continuations so a success and a timeout can't both resume one (a crash).
     private let lock = NSLock()
 
+    /// Set when created with the app off screen, where scans see nothing.
+    private let inBackground: Bool
+
     init(nameContains: String = "Oura",
          preferredPeripheralID: UUID? = nil,
-         excludedPeripheralIDs: Set<UUID> = []) {
+         excludedPeripheralIDs: Set<UUID> = [],
+         inBackground: Bool = false) {
+        self.inBackground = inBackground
         self.nameContains = nameContains
         self.preferredPeripheralID = preferredPeripheralID
         self.excludedPeripheralIDs = excludedPeripheralIDs
@@ -181,6 +186,15 @@ final class BLETransport: NSObject, RingTransport, CBCentralManagerDelegate, CBP
                .first(where: { $0.identifier == id }) {
             dlog("ble", "ring already linked id=\(id.uuidString.suffix(12)); connecting without a scan")
             attach(linked)
+            return
+        }
+        // iOS delivers nothing to an unfiltered scan in the background, so every
+        // background sync ended "couldn't connect". A connect request to the known
+        // ring, by contrast, is serviced in the background as soon as it advertises.
+        if inBackground, let id = preferredPeripheralID, !excludedPeripheralIDs.contains(id),
+           let known = central.retrievePeripherals(withIdentifiers: [id]).first {
+            dlog("ble", "background: connecting to known ring id=\(id.uuidString.suffix(12)) without a scan")
+            attach(known)
             return
         }
         scanStartedAt = Date()
