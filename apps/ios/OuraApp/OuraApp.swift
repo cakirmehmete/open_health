@@ -1283,10 +1283,13 @@ struct OuraApp: App {
         Keychain.migrateAccessibility()
         BackgroundSync.register()
         RingWatcher.shared.start()
+        WhoopLink.shared.start()
         // The app is often alive in the background (ring link); catch the unlock.
         NotificationCenter.default.addObserver(forName: UIApplication.protectedDataDidBecomeAvailableNotification,
                                                object: nil, queue: .main) { _ in
             MainActor.assumeIsolated { BackgroundSync.flushPendingExport(reason: "unlock") }
+            // WHOOP history drained while locked is waiting on the same thing.
+            WhoopHealth.shared.export(firmware: UserDefaults.standard.string(forKey: "whoop.firmware"))
         }
         HealthExport.shared.observeForWakeUps { done in
             Task { @MainActor in BackgroundSync.wake(reason: "health steps", completion: done) }

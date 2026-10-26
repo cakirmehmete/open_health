@@ -35,6 +35,8 @@ enum BackgroundLog {
 struct StatusView: View {
     @ObservedObject var ring: RingSync
     @ObservedObject var health: HealthExport = .shared
+    @ObservedObject var whoop: WhoopLink = .shared
+    @ObservedObject var whoopHealth: WhoopHealth = .shared
     let summary: Summary?
     let onSyncNow: () -> Void
     let onOpenRing: () -> Void
@@ -46,6 +48,7 @@ struct StatusView: View {
             List {
                 ringSection(now: context.date)
                 syncSection(now: context.date)
+                whoopSection(now: context.date)
                 healthSection(now: context.date)
                 backgroundSection(now: context.date)
                 Section {
@@ -113,6 +116,69 @@ struct StatusView: View {
         } footer: {
             Text("Syncs whenever the ring reconnects and about hourly otherwise, at most every 15 minutes. Swiping the app away stops background sync until you open it again.")
         }
+    }
+
+    // ── WHOOP ──
+    @ViewBuilder private func whoopSection(now: Date) -> some View {
+        Section {
+            LabeledContent("Strap") {
+                HStack(spacing: 6) {
+                    if whoop.state == .downloading { ProgressView().controlSize(.small) }
+                    Text(whoop.state.rawValue)
+                        .foregroundStyle(whoop.state == .ready || whoop.state == .downloading ? .green : .secondary)
+                }
+            }
+            if whoop.known {
+                if let pct = whoop.battery {
+                    LabeledContent("Battery") {
+                        HStack(spacing: 6) {
+                            Image(systemName: Self.batteryIcon(pct))
+                                .foregroundStyle(pct <= 15 ? .red : (pct <= 30 ? .orange : .green))
+                            Text("\(pct)%")
+                        }
+                    }
+                }
+                if let bpm = whoop.liveBPM { LabeledContent("Heart rate now", value: "\(bpm) bpm") }
+                LabeledContent("Last download") {
+                    if let at = whoop.lastDrainAt {
+                        Text("\(Self.ago(at, now: now)) · \(Self.span(whoop.lastDrainSeconds))")
+                            .foregroundStyle(Self.staleness(at, now: now))
+                    } else {
+                        Text("never")
+                    }
+                }
+                if let at = whoopHealth.lastExportAt {
+                    LabeledContent("Last Health write", value: Self.ago(at, now: now))
+                }
+                if whoop.clockSet == false {
+                    Text("The strap didn't accept the time. It may not record until it does; reconnecting retries.")
+                        .font(.footnote).foregroundStyle(.orange)
+                }
+                if let temp = whoop.skinTemp { LabeledContent("Skin temperature", value: String(format: "%.1f °C", temp)) }
+                if let firmware = whoop.firmware { LabeledContent("Firmware", value: firmware) }
+                if !whoopHealth.status.isEmpty {
+                    Text(whoopHealth.status).font(.footnote).foregroundStyle(.secondary)
+                }
+            }
+            if let issue = whoop.issue {
+                Text(issue).font(.footnote).foregroundStyle(.red)
+            }
+            if whoop.known {
+                Button(whoop.state == .downloading ? "Downloading…" : "Download now") {
+                    whoop.kick(reason: "Download now", force: true)
+                }
+                .disabled(whoop.state != .ready)
+            }
+            Button(whoop.known ? "Reconnect WHOOP" : "Connect WHOOP") { whoop.connectNew() }
+        } header: {
+            Text("WHOOP")
+        } footer: {
+            Text("Uses the pairing the WHOOP app made with this iPhone, so don't Forget the strap in Bluetooth settings. The strap stores about two weeks, so a run without your phone arrives the next time it's in range. Heart rate, HRV and resting heart rate go to Health when the switch below is on.")
+        }
+    }
+
+    private static func span(_ seconds: Int) -> String {
+        seconds >= 3600 ? String(format: "%.1f h of data", Double(seconds) / 3600) : "\(seconds / 60) min of data"
     }
 
     // ── Apple Health ──

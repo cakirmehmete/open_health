@@ -186,6 +186,11 @@ client re-derives packet timing at all — tracked as a follow-up.
 Now on both: the model-free Symptom Radar (`symptoms`, used when the Python runner
 has no `illness`) and the ring-clock warnings (`clock.warnings`). Still iOS-only:
 
+- **WHOOP 5.0 / MG strap** (`WhoopLink`, `WhoopStore`, `WhoopHealth`): iOS adopts the
+  bond the WHOOP app made, sets the strap clock, drains its history over BLE, and writes
+  per-minute heart rate, hourly HRV and daily resting heart rate to Apple Health. It is
+  separate from `build_summary`, so neither client renders WHOOP data and the web has no
+  WHOOP path; the iOS status page only shows link health.
 - **Sleep report without a hypnogram**: iOS still draws the time-in-bed strip and the
   signal lanes; the web returns early.
 - **iOS NSSA cache admission** includes the current model demographics before the

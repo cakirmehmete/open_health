@@ -63,6 +63,10 @@ targets:
       - path: BackgroundSync.swift
       - path: RingWatcher.swift
       - path: StatusView.swift
+      - path: WhoopProtocol.swift
+      - path: WhoopStore.swift
+      - path: WhoopHealth.swift
+      - path: WhoopLink.swift
       - path: ../generated/oura_core.swift
       - path: Assets.xcassets
     dependencies:

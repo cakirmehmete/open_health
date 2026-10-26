@@ -138,6 +138,8 @@ enum BackgroundSync {
         defer { coordinator.backgroundSession = false }
         let started = Date()
         dlog("bg", "start \(reason) locked=\(!UIApplication.shared.isProtectedDataAvailable)")
+        // The strap has its own link and drain; a wake is just a cue to check on it.
+        WhoopLink.shared.kick(reason: describe(reason))
         let report = await RingSync.shared.syncAutomaticallyIfNeeded()
         dlog("bg", "ring sync \(report == nil ? "skipped or failed" : "done") status=\(RingSync.shared.status)")
         let label = describe(reason)

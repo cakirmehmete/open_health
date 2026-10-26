@@ -310,7 +310,8 @@ final class HealthExport: ObservableObject {
         let pred = HKQuery.predicateForObjects(from: HKSource.default())
         let query = HKSampleQuery(sampleType: type, predicate: pred, limit: HKObjectQueryNoLimit,
                                   sortDescriptors: nil) { _, samples, error in
-            let ours: [HKObject] = samples ?? []
+            // WhoopHealth writes from this app too; its samples are not ours to reconcile.
+            let ours: [HKObject] = (samples ?? []).filter { !(Self.syncID($0)?.hasPrefix(WhoopHealth.syncPrefix) ?? false) }
             completion(ours, error)
         }
         store.execute(query)

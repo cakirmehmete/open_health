@@ -36,13 +36,13 @@
 		<string>md.thomas.openoura.sync</string>
 	</array>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>Open Oura connects to your Oura ring over Bluetooth to read your health data on-device.</string>
+	<string>Open Oura connects to your Oura ring and WHOOP strap over Bluetooth to read your health data on-device.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
-	<string>Open Oura connects to your Oura ring over Bluetooth to read your health data on-device.</string>
+	<string>Open Oura connects to your Oura ring and WHOOP strap over Bluetooth to read your health data on-device.</string>
 	<key>NSHealthShareUsageDescription</key>
 	<string>Open Oura can read selected Apple Health data to compare it with your ring metrics on-device.</string>
 	<key>NSHealthUpdateUsageDescription</key>
-	<string>Open Oura uses write access only when you choose to export ring-derived sleep, activity, and heart measurements to Apple Health.</string>
+	<string>Open Oura uses write access only when you choose to export sleep, activity, and heart measurements from your ring and WHOOP strap to Apple Health.</string>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
