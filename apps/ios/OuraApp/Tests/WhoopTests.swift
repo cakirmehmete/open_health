@@ -135,4 +135,19 @@ final class WhoopTests: XCTestCase {
         let day = (0..<120).map { WhoopMetrics.Minute(start: UInt32($0) * 60, bpm: 50 + Double($0 % 40), still: true) }
         XCTAssertEqual(try XCTUnwrap(WhoopMetrics.restingHeartRate(day)), 54.5, accuracy: 0.001)
     }
+
+    func testHeartbeatRunsChainIntervalsAndBreakOnGaps() {
+        let t0: UInt32 = 1_760_000_000
+        var seconds = (0..<UInt32(60)).map { WhoopSample(unix: t0 + $0, bpm: 60, intervals: [1000]) }
+        // 10 s off-wrist, then another minute.
+        seconds += (70..<UInt32(130)).map { WhoopSample(unix: t0 + $0, bpm: 60, intervals: [1000], activity: 0) }
+        let runs = WhoopMetrics.heartbeatRuns(seconds)
+        XCTAssertEqual(runs.count, 2)
+        XCTAssertEqual(runs[0].count, 60)
+        XCTAssertEqual(runs[0].last! - runs[0].first!, 59, accuracy: 0.001)
+        XCTAssertEqual(runs[1].first, Double(t0 + 70))
+        // A doubled interval runs ahead of the clock and is cut, not trusted.
+        let doubled = (0..<UInt32(60)).map { WhoopSample(unix: t0 + $0, bpm: 60, intervals: [1000, 1000]) }
+        XCTAssertTrue(WhoopMetrics.heartbeatRuns(doubled).allSatisfy { $0.count < 30 })
+    }
 }

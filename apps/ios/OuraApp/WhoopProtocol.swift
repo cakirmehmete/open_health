@@ -331,6 +331,29 @@ enum WhoopMetrics {
         return best.values.map(\.hrv).sorted { $0.start < $1.start }
     }
 
+    /// Beat times (unix seconds) rebuilt from the R-R intervals, as runs for Health's
+    /// heartbeat series. Each run starts at its record's second and chains the
+    /// intervals; it breaks where a second has no intervals for over 2.5 s, or where
+    /// the chained time drifts more than 2.5 s from the record clock (a missed or
+    /// repeated interval). Runs are capped at 5 minutes and need 30 beats.
+    static func heartbeatRuns(_ samples: [WhoopSample]) -> [[Double]] {
+        var runs: [[Double]] = []
+        var run: [Double] = []
+        func flush() { if run.count >= 30 { runs.append(run) }; run = [] }
+        for s in samples.sorted(by: { $0.unix < $1.unix }) {
+            let clock = Double(s.unix)
+            if let last = run.last, s.rrCount == 0, clock - last > 2.5 { flush() }
+            for rr in s.intervals where (300...2000).contains(rr) {
+                guard let last = run.last else { run = [clock]; continue }
+                let t = last + rr / 1000
+                if abs(t - clock) > 2.5 || t - run[0] > 300 { flush(); run = [clock]; continue }
+                run.append(t)
+            }
+        }
+        flush()
+        return runs
+    }
+
     /// Resting heart rate for a day: the mean of its lowest tenth of still minutes.
     /// Nil with under 60 still minutes (the strap wasn't worn enough).
     static func restingHeartRate(_ minutes: [Minute]) -> Double? {

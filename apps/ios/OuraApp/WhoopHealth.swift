@@ -42,6 +42,7 @@ final class WhoopHealth: ObservableObject, @unchecked Sendable {
             if let t = HKObjectType.quantityType(forIdentifier: id) { types.insert(t) }
         }
         if let rmssd = HealthExport.ringHRVType { types.insert(rmssd) }
+        types.insert(HKSeriesType.heartbeat())
         return types
     }
 
@@ -120,7 +121,13 @@ final class WhoopHealth: ObservableObject, @unchecked Sendable {
                 }
             }
             let hrvSeconds = seconds.filter { $0.unix >= hrvMark && $0.unix < hrvEnd }
+            var beatRuns: [[Double]] = []
             for reading in WhoopMetrics.hourlyHRV(hrvSeconds) {
+                // The beats behind each reading, so Bevel can compute HRV itself as it
+                // does from the Watch's short recordings.
+                if types.contains(HKSeriesType.heartbeat()) {
+                    beatRuns += WhoopMetrics.heartbeatRuns(hrvSeconds.filter { $0.unix >= reading.start && $0.unix < reading.end })
+                }
                 if let sdnn = type(.heartRateVariabilitySDNN) {
                     objects.append(HKQuantitySample(type: sdnn, quantity: HKQuantity(unit: msUnit, doubleValue: reading.rmssd),
                                                     start: date(reading.start), end: date(reading.end), device: device,
@@ -148,6 +155,14 @@ final class WhoopHealth: ObservableObject, @unchecked Sendable {
                 }
                 written += objects.count
             }
+            for run in beatRuns {
+                if let error = saveHeartbeats(run, device: device) {
+                    publish("Health write pending: \(error.localizedDescription)")
+                    dlog("whoop", "heartbeat series save failed: \(error)")
+                    return false
+                }
+                written += 1
+            }
             hrMark = max(hrMark, min(hrEnd, end))
             hrvMark = max(hrvMark, min(hrvEnd, end))
             if dayComplete { rhrMark = max(rhrMark, end) }
@@ -165,6 +180,36 @@ final class WhoopHealth: ObservableObject, @unchecked Sendable {
         }
         dlog("whoop", "health export wrote \(written) samples through \(through)")
         return true
+    }
+
+    /// One heartbeat series. Sync ID `openwhoop.beats.<startMs>.<count>`, so a retry
+    /// replaces rather than duplicates it.
+    private func saveHeartbeats(_ beats: [Double], device: HKDevice) -> Error? {
+        guard let first = beats.first else { return nil }
+        let builder = HKHeartbeatSeriesBuilder(healthStore: health, device: device, start: Date(timeIntervalSince1970: first))
+        let group = DispatchGroup()
+        var failure: Error?
+        for t in beats {
+            group.enter()
+            builder.addHeartbeatWithTimeInterval(sinceSeriesStartDate: t - first, precededByGap: false) { _, error in
+                if let error { failure = error }
+                group.leave()
+            }
+        }
+        group.enter()
+        builder.addMetadata(meta("beats.\(Int(first * 1000)).\(beats.count)")) { _, error in
+            if let error { failure = error }
+            group.leave()
+        }
+        group.wait()
+        if let failure { return failure }
+        group.enter()
+        builder.finishSeries { _, error in
+            if let error { failure = error }
+            group.leave()
+        }
+        group.wait()
+        return failure
     }
 
     private func save(_ objects: [HKObject]) -> Error? {
