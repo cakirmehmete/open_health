@@ -60,6 +60,15 @@ int oura_stepmotion(const char *model_path, const int64_t *timestamps_ms,
 // out_biomarkers (16 floats). Returns 0 / -1.
 int oura_illness(const char *model_path, const float *series, const float *scalars,
                  double *out_score, int *out_decision, float *out_biomarkers);
+// Breathing disturbances (sleepnet_bdi_0_4_0), mirroring tools/run_bdi_model.py.
+// `ibi_val` is n×3 [ibi_ms, amplitude, validity] (ecore-corrected, as for NSSA) with
+// epoch-ms `ibi_ts`; the validator needs >= 60 beats. Writes the 6 output metrics
+// [bdi_status (2 = ODI >= 15), status (1 ok, 3 short sleep, 4 low coverage),
+// total_sleep_min, odi_all, odi_nrem, odi_rem] (ODI = % of sleep epochs flagged),
+// the epoch count and the flagged-sleep-epoch count. Returns 0 / -1.
+int oura_bdi(const char *model_path, int64_t bedtime_start_ms, int64_t bedtime_end_ms,
+             const int64_t *ibi_ts, const float *ibi_val, int n_ibi,
+             float *out_metrics, int *out_epochs, int *out_flagged_sleep);
 // Free every loaded model module (they reload on next use). Waits for a running
 // inference to finish, so call it off the main thread.
 void oura_torch_release(void);

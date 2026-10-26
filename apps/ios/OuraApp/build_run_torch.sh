@@ -44,7 +44,7 @@ xcrun -sdk iphonesimulator swiftc -O \
     "$APPDIR/Models.swift" "$APPDIR/Core.swift" "$APPDIR/Components.swift" "$APPDIR/Reports.swift" \
     "$APPDIR/BLETransport.swift" "$APPDIR/RingSync.swift" "$APPDIR/ProfileSettings.swift" \
     "$APPDIR/EventStore.swift" "$APPDIR/ModelCache.swift" "$APPDIR/ModelFiles.swift" "$APPDIR/InsightsView.swift" "$APPDIR/ModelProgress.swift" \
-    "$APPDIR/SleepStaging.swift" "$APPDIR/IbiCorrection.swift" "$APPDIR/CvaModel.swift" "$APPDIR/ActivityModel.swift" "$APPDIR/IllnessModel.swift" \
+    "$APPDIR/SleepStaging.swift" "$APPDIR/IbiCorrection.swift" "$APPDIR/CvaModel.swift" "$APPDIR/ActivityModel.swift" "$APPDIR/IllnessModel.swift" "$APPDIR/BreathingModel.swift" \
     "$APPDIR/Diagnostics.swift" "$APPDIR/HealthExport.swift" "$APPDIR/DayExport.swift" "$APPDIR/WorkCoordinator.swift" \
     "$APPDIR/HeartRate.swift" "$APPDIR/RawData.swift" "$APPDIR/ResearchExport.swift" "$BUILD/TorchBridge.o" "$BUILD/CrashCatch.o" "$BUILD/NssaOps.o" \
     -L "$XCF" -loura_core \
@@ -62,7 +62,7 @@ mkdir -p "$APP/Frameworks"
 cp "$LT/lib/libtorch.dylib" "$LT/lib/libtorch_cpu.dylib" \
    "$LT/lib/libc10.dylib" "$LT/lib/libtorch_global_deps.dylib" "$APP/Frameworks/"
 # every exported version of the families the app runs (ModelFiles.swift picks one)
-for f in "$REPO"/notes/models/mobile/{sleepstaging_,automatic_activity_detection_,steps_motion_decoder_,cva_[0-9],illness_detection_}*; do
+for f in "$REPO"/notes/models/mobile/{sleepstaging_,automatic_activity_detection_,steps_motion_decoder_,cva_[0-9],illness_detection_,sleepnet_bdi_}*; do
     [ -f "$f" ] && cp "$f" "$APP/"
 done
 # the store runs in WAL mode; fold any -wal pages back in so the single-file copy

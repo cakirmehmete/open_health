@@ -30,11 +30,11 @@ struct ModuleSlot {
     std::unique_ptr<torch::jit::mobile::Module> module;
     std::string path;
 };
-static ModuleSlot g_sleepnet, g_cva, g_activity, g_stepmotion, g_illness;
+static ModuleSlot g_sleepnet, g_cva, g_activity, g_stepmotion, g_illness, g_bdi;
 
 void oura_torch_release(void) {
     std::lock_guard<std::mutex> lock(g_torch);
-    for (ModuleSlot *slot : {&g_sleepnet, &g_cva, &g_activity, &g_stepmotion, &g_illness}) {
+    for (ModuleSlot *slot : {&g_sleepnet, &g_cva, &g_activity, &g_stepmotion, &g_illness, &g_bdi}) {
         slot->module.reset();
         slot->path.clear();
     }
@@ -211,6 +211,43 @@ int oura_cva(const char *model_path, const float *ppg, int n_segs, const float *
         return 0;
     } catch (const std::exception &e) {
         NSLog(@"oura_cva: %s", e.what());
+        return -1;
+    }
+}
+
+int oura_bdi(const char *model_path, int64_t bedtime_start_ms, int64_t bedtime_end_ms,
+             const int64_t *ibi_ts, const float *ibi_val, int n_ibi,
+             float *out_metrics, int *out_epochs, int *out_flagged_sleep) {
+    if (!model_path || !ibi_ts || !ibi_val || !out_metrics || !out_epochs || !out_flagged_sleep || n_ibi < 60)
+        return -1;
+    std::lock_guard<std::mutex> lock(g_torch);
+    try {
+        auto &m = cachedModule(model_path, g_bdi.module, g_bdi.path);
+        int64_t bed[2] = {bedtime_start_ms, bedtime_end_ms};
+        auto bed_t = at::from_blob(bed, {2}, at::kLong).clone();
+        auto out = m.forward({bed_t, blobFloat2d(ibi_val, n_ibi, 3), blobLong(ibi_ts, n_ibi)}).toTuple();
+        // (timestamps, sleepStages[N,5], apneaEvents[N,2], outputMetrics[6,1], debug[10])
+        auto stages = out->elements()[1].toTensor();
+        auto apnea = out->elements()[2].toTensor();
+        auto metrics = out->elements()[3].toTensor().reshape({-1}).to(at::kFloat).contiguous();
+        if (metrics.numel() < 6) return -1;
+        for (int i = 0; i < 6; ++i) out_metrics[i] = metrics[i].item<float>();
+        int64_t n = stages.size(0);
+        *out_epochs = (int)n;
+        int flagged = 0;
+        if (n > 0 && apnea.size(0) == n) {
+            // col0 of sleepStages is the stage code: 1 deep, 2 light, 3 REM, 4 awake.
+            auto code = stages.select(1, 0);
+            auto flag = apnea.select(1, 0);
+            for (int64_t i = 0; i < n; ++i) {
+                double c = code[i].item<double>();
+                if (c >= 1 && c <= 3 && flag[i].item<double>() >= 0.5) ++flagged;
+            }
+        }
+        *out_flagged_sleep = flagged;
+        return 0;
+    } catch (const std::exception &e) {
+        NSLog(@"oura_bdi: %s", e.what());
         return -1;
     }
 }

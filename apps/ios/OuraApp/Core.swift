@@ -184,7 +184,8 @@ enum Core {
         var cva: CvaModel.Result?
         var workouts: [WorkoutSession] = []
         var illness: IllnessResult?
-        var sleepErr: String?, cvaErr: String?, actErr: String?, illErr: String?
+        var sleepErr: String?, cvaErr: String?, actErr: String?, illErr: String?, breathErr: String?
+        var breathing: [String: Breathing] = [:]
 
         var stageStarted = ProcessInfo.processInfo.systemUptime
         func stageFinished(_ stage: String) {
@@ -218,6 +219,7 @@ enum Core {
             s.analysis_version = ModelCacheStore.version
             workouts = rAct.sessions; actErr = rAct.error
             illness = rIll.result; illErr = rIll.error
+            breathing = BreathingModel.cached(nights: base.nights)
             dlog("models", "store unchanged since the last complete pass; event read skipped")
             stageFinished("cached")
             if AnalysisRun.cancelled { return previous ?? base }
@@ -258,6 +260,11 @@ enum Core {
                 let rIll = IllnessModel.run(profile: profile, events: events, clock: clock, knownDigest: storeDigest)
                 illness = rIll.result; illErr = rIll.error
                 stageFinished("illness")
+                if AnalysisRun.cancelled { return previous ?? base }
+                progress("Analyzing breathing")
+                let rBreath = BreathingModel.run(nights: base.nights, events: events, clock: clock)
+                breathing = rBreath.results; breathErr = rBreath.error
+                stageFinished("breathing")
             } else if let readErr {
                 // The shared read failed: every event-fed model is unavailable this
                 // pass. Surface one error; the publish below falls back to `previous`.
@@ -275,6 +282,11 @@ enum Core {
         // fold SleepNet's hypnogram + stage breakdown into each night, keyed by the exact
         // bedtime start and absolute epoch so rebooted counters cannot collide.
         applySleepStages(staged, to: &s)
+        for i in s.nights.indices {
+            let key = s.nights[i].stagingKey
+            let result = breathing[key] ?? previous?.nights.first(where: { $0.stagingKey == key })?.breathing
+            s.nights[i].breathing = result
+        }
         if let cva {
             s.cardio = Cardio(vascular_age: cva.vascularAge, chronological_age: profile?.age ?? 30,
                               pwv_ms: cva.pwv, segments: cva.segments)
@@ -286,7 +298,7 @@ enum Core {
         s.workouts = (actErr == nil || !workouts.isEmpty) ? workouts : (previous?.workouts ?? workouts)
         s.illness = (illErr == nil || illness != nil) ? illness : previous?.illness
         var seen = Set<String>()
-        s.modelErrors = [sleepErr, cvaErr, actErr, illErr].compactMap { $0 }
+        s.modelErrors = [sleepErr, cvaErr, actErr, illErr, breathErr].compactMap { $0 }
             .filter { seen.insert($0).inserted }
         for error in s.modelErrors { dlog("models", "failed: \(error)") }
         return s

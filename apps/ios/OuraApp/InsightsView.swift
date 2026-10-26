@@ -42,6 +42,7 @@ enum Tone {
 struct PersonalRange {
     let lower: Double
     let upper: Double
+    init(lower: Double, upper: Double) { self.lower = lower; self.upper = upper }
     init?(_ values: [Double]) {
         let v = values.sorted()
         guard v.count >= 5 else { return nil }
@@ -69,6 +70,7 @@ struct InsightsView: View {
                 if let s = summary, s.error == nil {
                     rings(s)
                     sleepCard(s)
+                    breathingCard(s)
                     activityCard(s)
                     vitalCard(s, .hrv, title: "Heart rate variability", icon: "waveform.path.ecg")
                     vitalCard(s, .heartRate, title: "Resting heart rate", icon: "heart")
@@ -137,6 +139,38 @@ struct InsightsView: View {
                             Text(Sleep.isOuraStaging(night.staging_source) ? "Staged by Oura's model" : "Signal estimate")
                                 .font(.caption2).foregroundStyle(Ink.dim)
                         }
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    // Oura's SleepNet-BDI: the model calls a night elevated at ODI >= 15 % of sleep epochs.
+    @ViewBuilder private func breathingCard(_ s: Summary) -> some View {
+        if let b = lastNight(s)?.breathing {
+            let ok = b.status == 1
+            let odi = b.odi_pct ?? 0
+            let normal = PersonalRange(lower: 0, upper: 15)
+            NavigationLink {
+                BreathingDetail(series: s.nightlySeries { $0.breathing?.status == 1 ? $0.breathing?.odi_pct : nil },
+                                latest: b, normal: normal)
+            } label: {
+                InsightCard(icon: "lungs", title: "Breathing disturbances",
+                            tone: !ok ? .neutral : (b.elevated == true ? .attention : (odi >= 7.5 ? .fair : .optimal)),
+                            value: ok ? String(format: "%.1f", b.events_per_hour ?? 0) : "–",
+                            unit: ok ? "per hour" : "") {
+                    if ok {
+                        VStack(alignment: .leading, spacing: 4) {
+                            RangeSlider(lower: normal.lower, upper: normal.upper, value: odi,
+                                        domain: 0...max(30, odi), format: { "\(Int($0))%" })
+                            Text(String(format: "%.1f%% of sleep flagged by Oura's breathing model", odi))
+                                .font(.caption).foregroundStyle(Ink.dim)
+                        }
+                    } else {
+                        Text(b.status == 3 ? "Under 3 h of sleep last night, so no verdict."
+                                           : "Too few clean heartbeats last night for a verdict.")
+                            .font(.caption).foregroundStyle(Ink.dim)
                     }
                 }
             }
@@ -568,5 +602,41 @@ struct SymptomRadarDetail: View {
         case "TemperatureDeviation": return "Temperature regulation"
         default: return type
         }
+    }
+}
+
+struct BreathingDetail: View {
+    let series: [DatedVital]
+    let latest: Breathing
+    let normal: PersonalRange
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                Text("Share of sleep with a likely breathing disturbance, per night")
+                    .font(.footnote).foregroundStyle(Ink.dim)
+                BandedTrendChart(points: Array(series.suffix(180)), range: normal, decimals: 1)
+                Text("Contributors").font(.title3).foregroundStyle(Ink.text)
+                if let odi = latest.odi_nrem_pct {
+                    ContributorRow(label: "Non-REM sleep", tone: normal.tone(odi), fraction: 1 - min(1, odi / 30),
+                                   detail: String(format: "%.1f%% of non-REM epochs flagged", odi))
+                }
+                if let odi = latest.odi_rem_pct {
+                    ContributorRow(label: "REM sleep", tone: normal.tone(odi), fraction: 1 - min(1, odi / 30),
+                                   detail: String(format: "%.1f%% of REM epochs flagged", odi))
+                }
+                if let min = latest.total_sleep_min {
+                    ContributorRow(label: "Sleep analysed", tone: min >= 360 ? .optimal : .fair,
+                                   fraction: min / 480, detail: InsightsView.hm(min / 60))
+                }
+                Text("Oura's model flags 30-second epochs from your heartbeat; it is not a sleep apnea test. A night counts as elevated at 15 % or more.")
+                    .font(.caption).foregroundStyle(Ink.dim)
+            }
+            .padding(16)
+        }
+        .background(Ink.canvas.ignoresSafeArea())
+        .navigationTitle("Breathing")
+        .navigationBarTitleDisplayMode(.inline)
+        .preferredColorScheme(.dark)
     }
 }

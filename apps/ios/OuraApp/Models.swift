@@ -83,6 +83,8 @@ struct NightRow: Codable, Identifiable {
     /// Nightly respiratory rate (breaths/min), the ring's own per-window estimate.
     var breath_rate: Double? = nil
     var sleep_score: SleepScore? = nil
+    /// Oura's SleepNet-BDI result (web: `nights[].breathing`; iOS: BreathingModel).
+    var breathing: Breathing? = nil
     var id: String { (date ?? "") + (start ?? "") }
     var hasHypnogram: Bool { (hypnogram?.count ?? 0) > 1 }
     var isBedtimeManual: Bool { bedtime_manual ?? false }
@@ -166,6 +168,20 @@ struct WorkoutSession: Identifiable, Codable {
     var id: String { start + label }
     var dayLabel: String { String(start.prefix(10)) }      // YYYY-MM-DD
     var startHM: String { String(start.suffix(5)) }        // HH:MM
+}
+/// Breathing disturbances for one night (tools/run_bdi_model.py's JSON shape).
+/// `odi_pct` is the share of sleep epochs flagged; status 1 = ok, 3 = under 3 h of
+/// sleep, 4 = beat coverage under 70 % (no verdict).
+struct Breathing: Codable {
+    var status: Int?
+    var elevated: Bool?
+    var total_sleep_min: Double?
+    var odi_pct: Double?
+    var odi_nrem_pct: Double?
+    var odi_rem_pct: Double?
+    var flagged_epochs: Int?
+    var events_per_hour: Double?
+    var model: String?
 }
 struct Cardio: Codable { var vascular_age: Double?; var chronological_age: Double?; var pwv_ms: Double?; var segments: Int? }
 struct Fitness: Codable { var vo2max: Double? }

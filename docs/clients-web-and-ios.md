@@ -48,6 +48,7 @@ metric there once and both clients receive it in the JSON.
 | **Heart rate across the day** (per-slot 5th–95th band + median tick; beats vs 5-min averages) | `openDayPage`→`heartSection`, `hrTimelineSvg` (`GET /api/hourly-hr?minutes=`; 15 min default, 1 h switch) | `HeartRate.swift` (`HourlyHR`, hourly) | `oura-summary::hourly_hr::{hr_bins, hourly_hr}` (not in the summary JSON) | — |
 | Stage breakdown | `stageBar` | `StageBreakdown` | `nights[].{deep,light,rem,wake}_pct` | SleepNet |
 | **Autonomic recovery by stage** (mean HR/HRV in deep/light/REM) | `sleepSection` autonomic grid | `SleepReport` `autonomicGrid` | `nights[].autonomic` | SleepNet (needs hypnogram) |
+| **Breathing disturbances** (ODI = % of sleep epochs flagged, events/h, NREM/REM split) | `sleepSection` "Breathing disturbances" grid | Today tab card → `BreathingDetail` (InsightsView.swift) | `nights[].breathing` | SleepNet-BDI (web: `run_bdi_model.py --batch` · iOS: `BreathingModel`) |
 | **Cardiovascular age** | `renderCardio` | Cardio section | `cardio` | CVA (web: Python · iOS: `CvaModel`) |
 | **VO₂max estimate** | `renderCardio` | Fitness section | `fitness.vo2max` | — (Jackson, model-free) |
 | Movement ridge | `ridgeSvg` | `MovementRidge` | `activity_profile` | — (MET, model-free) |
@@ -287,6 +288,10 @@ has no `illness`) and the ring-clock warnings (`clock.warnings`). Still iOS-only
   ring's `oura.db`**. **Deliberately web-only** — like the DNA explorer it has nothing to do
   with ring data, does not go through `oura-summary`, and is not mirrored on iOS. When
   extraction is built, `blood.rs`'s marker model is the reusable brain.
+
+- **Breathing disturbances in Apple Health**: not written. HealthKit's sleeping
+  breathing-disturbances type is Apple's own Watch metric, and the BDI output is a
+  share of flagged epochs rather than Apple's per-hour count. Shown in both apps only.
 
 When you close one of these gaps, update this section.
 

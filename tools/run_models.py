@@ -96,13 +96,14 @@ def run_bdi(db, tz):
     # outputs (names from app SleepNetBdiPyTorchV04Model.ModelOutput):
     #   timestamps, sleepStages[N,5], apneaEvents[N,2], outputMetrics[6], debugMetrics[10]
     timestamps, sleep_stages, apnea_events, out_metrics, dbg_metrics = m(bedtime_input, ibi_vals, ibi_ts)
-    # sleepStages: col0 marker, cols1-4 = 4-class softmax. Order confirmed by
-    # cross-checking moonstone on the same night: [AWAKE, LIGHT, REM, DEEP].
+    # sleepStages: col0 = argmax+1 stage code, cols1-4 = 4-class softmax. The model's
+    # own post-processor counts codes 1-2 as NREM, 3 as REM and 4 as not asleep, so the
+    # order is [DEEP, LIGHT, REM, AWAKE] (Oura's 1..4 codes; matches its total sleep).
     stage = sleep_stages[:, 1:5].argmax(dim=1)
     n = stage.shape[0]
     if n == 0:
         sys.exit("SleepNet-BDI returned zero epochs for this window")
-    labels = ["awake", "light", "REM", "deep"]
+    labels = ["deep", "light", "REM", "awake"]
     print(f"\nHypnogram: {n} epochs x 30s = {n*30/60:.0f} min")
     for s in range(4):
         c = int((stage == s).sum())

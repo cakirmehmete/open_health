@@ -1186,6 +1186,23 @@ function sleepSection(d, ymd, axis, cursor) {
       mc("HR · REM", val(au.hr_rem, " bpm"));
     sec.append(at);
   }
+  // Oura's SleepNet-BDI: share of sleep epochs with a likely breathing disturbance
+  // (ODI, %), and the same as events per hour. status 1 = ok; 3/4 = too little
+  // sleep or beat coverage for the model to judge the night.
+  const br = n.breathing;
+  if (br) {
+    sec.append(el("p", "subhead", "Breathing disturbances"));
+    const bg = el("div", "metric-grid");
+    const pct = (x) => (x != null ? x.toFixed(1) + "%" : "—");
+    const verdict = br.status !== 1 ? (br.status === 3 ? "too little sleep" : "low beat coverage")
+      : br.elevated ? "elevated" : "normal";
+    bg.innerHTML =
+      mc("Breathing", verdict) +
+      mc("Events / h", br.events_per_hour != null ? br.events_per_hour.toFixed(1) : "—") +
+      mc("Epochs flagged", pct(br.odi_pct)) +
+      mc("NREM · REM", `${pct(br.odi_nrem_pct)} · ${pct(br.odi_rem_pct)}`);
+    sec.append(bg);
+  }
   sec.append(el("p", "subhead", "Interpretation"), sleepInterpretation(d, n, m));
   return sec;
 }

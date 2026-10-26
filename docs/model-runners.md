@@ -11,14 +11,18 @@ each can and can't do.
 | --- | --- | --- | --- |
 | `oura sessions` / `tools/run_activity_model.py` | `automatic_activity_detection_3_1_11` | activity/workout segments + type label | ✅ runs |
 | `tools/run_sleep_model.py` | `sleepstaging_2_6_0` (NSSA, the official app's stager) | DEEP/LIGHT/REM/WAKE hypnogram per ring bedtime + efficiency | ✅ runs (custom ops + classifier, see [sleep-staging.md](algorithms/sleep-staging.md)) |
-| `tools/run_models.py bdi` | `sleepnet_bdi_0_4_0` | hypnogram + apnea/breathing-disturbance | ✅ runs |
+| `tools/run_bdi_model.py` (dashboard: `--batch`) / `run_models.py bdi` | `sleepnet_bdi_0_4_0` | breathing disturbances per night (ODI = % of sleep epochs flagged, events/h) + its own hypnogram | ✅ runs (iOS: `BreathingModel.swift`) |
 | `tools/run_cva_model.py` | `cva_2_1_0` | cardiovascular (vascular) age + pulse-wave velocity | ✅ runs (needs `cva_ppg` on — see [cva-cardiovascular-age.md](cva-cardiovascular-age.md)) |
 | `tools/run_spo2.py` | (no model — Oura's calibration) | overnight SpO2 % | ✅ runs (see [spo2-calibration.md](spo2-calibration.md)) |
 | `tools/run_models.py daily_medians` | `daily_medians_1_1_0` | HRV/HR/temp/MET daily medians | ⚠️ runs but needs **awake** HRV (ours is nocturnal) |
 | `tools/inspect_models.py` | all | dump each model's `forward()` schema | helper |
 
-The two sleep models cross-validate (close DEEP/LIGHT/REM/WAKE %); that agreement
-also fixes the BDI stage-column order to `[AWAKE, LIGHT, REM, DEEP]`.
+BDI's `sleepStages` col0 is the stage code (1 deep, 2 light, 3 REM, 4 awake) and its
+softmax columns follow that order; its post-processor counts codes 1–2 as NREM. An
+earlier note here read the columns as `[AWAKE, LIGHT, REM, DEEP]`, which contradicts
+the model's own total-sleep figure. `outputMetrics` = `[bdi_status (2 when ODI ≥ 15),
+status (1 ok, 3 sleep < 180 min, 4 IBI coverage < 70 %), total_sleep_min, odi, odi_nrem,
+odi_rem]`, with ODI the percentage of sleep epochs flagged (not events per hour).
 
 ## What's blocked, and why (data availability, not wiring)
 

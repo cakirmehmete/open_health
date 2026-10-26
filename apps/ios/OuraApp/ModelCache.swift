@@ -182,6 +182,7 @@ enum ModelCacheStore {
             try? FileManager.default.removeItem(at: url(illnessFile))
             try? FileManager.default.removeItem(at: url(activityFile))
             try? FileManager.default.removeItem(at: url(stagingFile))
+            try? FileManager.default.removeItem(at: url(BreathingModel.cacheFile))
         }
     }
 

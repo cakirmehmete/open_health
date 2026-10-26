@@ -73,6 +73,7 @@ targets:
       - path: CvaModel.swift
       - path: ActivityModel.swift
       - path: IllnessModel.swift
+      - path: BreathingModel.swift
       - path: TorchBridge.mm
       - path: TorchBridge.h
       - path: CrashCatch.c
@@ -97,6 +98,7 @@ targets:
           - "steps_motion_decoder_*.ptl"
           - "cva_[0-9]*.ptl"
           - "illness_detection_*.ptl"
+          - "sleepnet_bdi_*.ptl"
         buildPhase: resources
     dependencies:
       - sdk: HealthKit.framework
