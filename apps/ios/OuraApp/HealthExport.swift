@@ -242,7 +242,8 @@ final class HealthExport: ObservableObject {
             return false
         }
 
-        let wantedIDs = Set(samples.compactMap(Self.syncID) + workouts.map(\.syncID) + beatSeries.map(\.syncID))
+        let wantedIDs = Set(samples.compactMap(Self.syncID) + workouts.map(\.syncID) + workouts.compactMap(\.kcalSyncID)
+                            + beatSeries.map(\.syncID))
         let stale = ours.filter { sample in
             guard let id = Self.syncID(sample) else { return true }
             return !wantedIDs.contains(id)
@@ -323,7 +324,7 @@ final class HealthExport: ObservableObject {
         // Daytime HR comes from the event table, not the summary, so let an
         // otherwise unchanged summary still reconcile once per hour.
         parts.append("ids-v2:\(Int(Date().timeIntervalSince1970 / 3600)):\(s.fitness?.vo2max ?? 0)")
-        parts.append(contentsOf: s.workouts.filter { $0.isWorkout >= 0.5 }.map(\.id).sorted())
+        parts.append(contentsOf: s.workouts.filter { $0.isWorkout >= 0.5 }.map { "\($0.id):\($0.kcal ?? -1)" }.sorted())
         for n in s.nights {
             let st = n.hypnogram ?? []
             parts.append("n\(n.start_ds ?? 0):\(st.count):\(st.reduce(0, +)):\(n.hrv_ms ?? 0):\(n.rhr ?? 0):\(n.spo2_mean ?? 0):\(n.breath_rate ?? 0):\(n.series?.hr.count ?? 0)")
@@ -340,7 +341,7 @@ final class HealthExport: ObservableObject {
         let nights = Self.distinctNights(s.nights)
         for night in nights { out.append(contentsOf: sleepSamples(night)) }
         for night in nights { out.append(contentsOf: Self.heartSamples(night, canShare: canShare)) }
-        out.append(contentsOf: dailySamples(s.activity_daily))
+        out.append(contentsOf: dailySamples(s.activity_daily, workoutMetKcal: Self.workoutMetKcal(s)))
         out.append(contentsOf: daytimeHeartSamples(nights: s.nights))
         out.append(contentsOf: fitnessSamples(s.fitness))
         return out
@@ -391,7 +392,43 @@ final class HealthExport: ObservableObject {
         let type: HKWorkoutActivityType
         let start: Date
         let end: Date
-        var syncID: String { HealthExport.syncPrefix + "workout.\(id)" }
+        /// Active kcal from Oura's energy model, attached to the workout.
+        let kcal: Double?
+        // A changed calorie figure replaces the workout instead of leaving the old one.
+        var syncID: String { HealthExport.syncPrefix + "workout.\(id)" + (kcal.map { ".\(Int($0.rounded()))kcal" } ?? "") }
+        /// The calorie sample saved inside the workout; reconciled with it.
+        var kcalSyncID: String? { kcal.map { HealthExport.syncPrefix + "workout-kcal.\(id).\(Int($0.rounded()))" } }
+    }
+
+    /// The MET estimate for each local day's model-scored workout minutes (the part
+    /// of that day's Active Energy the workouts now carry themselves), from the same
+    /// 15-min MET-above-rest profile as the daily figure: kcal = MET x kg x hours.
+    static func workoutMetKcal(_ s: Summary) -> [String: Double] {
+        let weight = s.profile?.weight_kg ?? 75
+        var out: [String: Double] = [:]
+        for w in s.workouts where w.isWorkout >= 0.5 && w.kcal != nil {
+            guard let (start, end) = workoutDates(w) else { continue }
+            var t = start
+            while t < end {
+                let day = Calendar.current.startOfDay(for: t)
+                let key = Self.ymd(day)
+                let bucket = Int(t.timeIntervalSince(day) / 900)
+                let bucketEnd = min(end, day.addingTimeInterval(Double(bucket + 1) * 900))
+                if let profile = s.activity_profile[key], bucket < profile.count {
+                    out[key, default: 0] += max(0, profile[bucket]) * weight * bucketEnd.timeIntervalSince(t) / 3600
+                }
+                t = bucketEnd
+            }
+        }
+        return out
+    }
+
+    private static func ymd(_ d: Date) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = .current
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: d)
     }
 
     private func plannedWorkouts(_ workouts: [WorkoutSession]) -> [PlannedWorkout] {
@@ -399,7 +436,7 @@ final class HealthExport: ObservableObject {
         var out: [PlannedWorkout] = []
         for w in workouts where w.isWorkout >= 0.5 {
             guard let (start, end) = Self.workoutDates(w) else { continue }
-            out.append(PlannedWorkout(id: w.id, type: Self.activityType(w.label), start: start, end: end))
+            out.append(PlannedWorkout(id: w.id, type: Self.activityType(w.label), start: start, end: end, kcal: w.kcal))
         }
         return out
     }
@@ -530,14 +567,28 @@ final class HealthExport: ObservableObject {
         group.enter()
         builder.beginCollection(withStart: plan.start) { success, error in
             guard success else { fail(error, fallback: "Could not start workout collection."); return }
-            builder.addMetadata(Self.meta("workout.\(plan.id)")) { success, error in
+            builder.addMetadata(Self.meta(String(plan.syncID.dropFirst(Self.syncPrefix.count)))) { success, error in
                 guard success else { fail(error, fallback: "Could not tag workout."); return }
-                builder.endCollection(withEnd: plan.end) { success, error in
-                    guard success else { fail(error, fallback: "Could not end workout collection."); return }
-                    builder.finishWorkout { _, error in
-                        result = error
-                        group.leave()
+                func end() {
+                    builder.endCollection(withEnd: plan.end) { success, error in
+                        guard success else { fail(error, fallback: "Could not end workout collection."); return }
+                        builder.finishWorkout { _, error in
+                            result = error
+                            group.leave()
+                        }
                     }
+                }
+                // The workout's calories ride on the workout (Bevel and Fitness read them
+                // there); the day's Active Energy sample leaves these minutes out.
+                guard let kcal = plan.kcal, kcal > 0, let kcalID = plan.kcalSyncID,
+                      let type = HKObjectType.quantityType(forIdentifier: .activeEnergyBurned),
+                      self.canShare(type) else { end(); return }
+                let sample = HKQuantitySample(type: type, quantity: HKQuantity(unit: .kilocalorie(), doubleValue: kcal),
+                                              start: plan.start, end: plan.end,
+                                              metadata: Self.meta(String(kcalID.dropFirst(Self.syncPrefix.count))))
+                builder.add([sample]) { success, error in
+                    guard success else { fail(error, fallback: "Could not add workout calories."); return }
+                    end()
                 }
             }
         }
@@ -682,7 +733,7 @@ final class HealthExport: ObservableObject {
         return out
     }
 
-    private func dailySamples(_ daily: [String: DailyStat]) -> [HKObject] {
+    private func dailySamples(_ daily: [String: DailyStat], workoutMetKcal: [String: Double] = [:]) -> [HKObject] {
         var out: [HKObject] = []
         let cal = Calendar.current
         let dayFmt = DateFormatter()
@@ -699,7 +750,7 @@ final class HealthExport: ObservableObject {
                                             metadata: Self.meta("steps.\(day).\(Int(steps.rounded()))")))
             }
             if let type = HKObjectType.quantityType(forIdentifier: .activeEnergyBurned), canShare(type),
-               let kcal = st.active_kcal, kcal > 0 {
+               let total = st.active_kcal, case let kcal = max(0, total - (workoutMetKcal[day] ?? 0)), kcal > 0 {
                 let q = HKQuantity(unit: .kilocalorie(), doubleValue: kcal)
                 out.append(HKQuantitySample(type: type, quantity: q, start: start, end: end,
                                             metadata: Self.meta("kcal.\(day).\(Int(kcal.rounded()))")))

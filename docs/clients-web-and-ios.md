@@ -290,6 +290,10 @@ has no `illness`) and the ring-clock warnings (`clock.warnings`). Still iOS-only
   with ring data, does not go through `oura-summary`, and is not mirrored on iOS. When
   extraction is built, `blood.rs`'s marker model is the reusable brain.
 
+- **Workout calories in Apple Health (iOS)**: a workout with the energy model's kcal
+  carries it as an Active Energy sample inside the workout, and that day's Active
+  Energy sample drops the MET estimate for those minutes (`HealthExport.workoutMetKcal`,
+  from `activity_profile`), so the day total is not counted twice.
 - **Breathing disturbances in Apple Health**: not written. HealthKit's sleeping
   breathing-disturbances type is Apple's own Watch metric, and the BDI output is a
   share of flagged epochs rather than Apple's per-hour count. Shown in both apps only.
