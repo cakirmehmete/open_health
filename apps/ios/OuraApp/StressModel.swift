@@ -147,7 +147,7 @@ enum StressModel {
         }
         if AnalysisRun.cancelled { return (nil, "analysis interrupted") }
         for (d, v) in scaled { days[d]?.mean_intensity_scaled = (v.reduce(0, +) / Double(v.count) * 1000).rounded() / 1000 }
-        dlog("models", "stress awake=\(awake.count) scored=\(samples.count) rejected=\(rejected) failed=\(failures)")
+        dlog("models", "stress awake=\(awake.count) scored=\(samples.count) rejected=\(rejected) errors=\(failures)")
         if samples.isEmpty && failures > 0 { return (nil, "stress model failed") }
         return finish(DaytimeStress(model: model.name, awake_hrv_samples: awake.count, night_hrv_samples: night.count,
                                     met_imputed: imputed, neutral_zone_ms: samples.last?.recovery_limit,

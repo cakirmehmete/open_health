@@ -79,7 +79,7 @@ enum BreathingModel {
             cache[key(night)] = FingerprintedEntry(fp: model.name, value: value)
         }
         ModelCacheStore.save(cacheFile, globalKey: gk, entries: cache)
-        dlog("models", "breathing nights=\(wanted.count) failed=\(failures)")
+        dlog("models", "breathing nights=\(wanted.count) errors=\(failures)")
         let results = cached(nights: Array(wanted))
         return (results, results.isEmpty && failures > 0 ? "breathing model failed" : nil)
     }
