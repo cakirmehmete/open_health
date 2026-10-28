@@ -39,6 +39,7 @@ enum SummaryCache {
 
     static func save(_ summary: Summary) {
         guard summary.error == nil else { return }
+        IllnessAlert.check(summary)
         queue.async {
             guard let data = try? JSONEncoder().encode(CachedSummary(summary: summary, workouts: summary.workouts, illness: summary.illness, stress: summary.stress)) else { return }
             try? data.write(to: url, options: .atomic)
@@ -187,6 +188,7 @@ enum Core {
         var illness: IllnessResult?
         var sleepErr: String?, cvaErr: String?, actErr: String?, illErr: String?, breathErr: String?, stressErr: String?
         var breathing: [String: Breathing] = [:]
+        var nightBreath: [String: NightBreathing.Result] = [:]
         var stress: DaytimeStress?
         var steps: [String: [Double]] = [:]
         var stepsErr: String?
@@ -225,6 +227,7 @@ enum Core {
             workouts = rAct.sessions; actErr = rAct.error
             illness = rIll.result; illErr = rIll.error
             breathing = BreathingModel.cached(nights: base.nights)
+            nightBreath = NightBreathing.cached(nights: base.nights)
             stress = rStress.result; stressErr = rStress.error
             steps = StepCounter.cached()
             dlog("models", "store unchanged since the last complete pass; event read skipped")
@@ -263,8 +266,15 @@ enum Core {
                 workouts = rAct.sessions; actErr = rAct.error
                 stageFinished("activity")
                 if AnalysisRun.cancelled { return previous ?? base }
+                progress("Analyzing breathing rate")
+                let rBr = NightBreathing.run(nights: base.nights, events: events, clock: clock)
+                nightBreath = rBr.results
+                stageFinished("breathing-rate")
+                if AnalysisRun.cancelled { return previous ?? base }
                 progress("Analyzing symptom radar")
-                let rIll = IllnessModel.run(profile: profile, events: events, clock: clock, knownDigest: storeDigest)
+                let rIll = IllnessModel.run(profile: profile, events: events, clock: clock,
+                                            breathByWake: NightBreathing.byWakeDate(nightBreath, nights: base.nights, summary: base),
+                                            knownDigest: storeDigest)
                 illness = rIll.result; illErr = rIll.error
                 stageFinished("illness")
                 if AnalysisRun.cancelled { return previous ?? base }
@@ -305,6 +315,11 @@ enum Core {
             let key = s.nights[i].stagingKey
             let result = breathing[key] ?? previous?.nights.first(where: { $0.stagingKey == key })?.breathing
             s.nights[i].breathing = result
+            // Oura's ecore nightly breathing rate replaces the ring's per-window median.
+            if let r = nightBreath[key] {
+                s.nights[i].breath_rate = (r.rate * 10).rounded() / 10
+                s.nights[i].breath_rate_source = "ecore"
+            }
         }
         if let cva {
             s.cardio = Cardio(vascular_age: cva.vascularAge, chronological_age: profile?.age ?? 30,

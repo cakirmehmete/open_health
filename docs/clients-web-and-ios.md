@@ -56,8 +56,10 @@ formula over age, sex and weight). If no model covers a value, leave it out.
 | **Heart rate across the day** (per-slot 5th–95th band + median tick; beats vs 5-min averages) | `openDayPage`→`heartSection`, `hrTimelineSvg` (`GET /api/hourly-hr?minutes=`; 15 min default, 1 h switch) | `HeartRate.swift` (`HourlyHR`, hourly) | `oura-summary::hourly_hr::{hr_bins, hourly_hr}` (not in the summary JSON) | — |
 | Stage breakdown | `stageBar` | `StageBreakdown` | `nights[].{deep,light,rem,wake}_pct` | SleepNet |
 | **Autonomic recovery by stage** (mean HR/HRV in deep/light/REM) | `sleepSection` autonomic grid | `SleepReport` `autonomicGrid` | `nights[].autonomic` | SleepNet (needs hypnogram) |
+| **Nightly breathing rate** (Oura's ecore calculation; also the Symptom Radar's `average_breath` and Apple Health Respiratory Rate) | — (in the summary, not drawn yet) | `SleepScoreCard` breath rate; Health export | `nights[].breath_rate`, `breath_rate_source` (`ecore` / `ring`) | ecore `breathing_rate_calculate_averages` (web: `run_breathing_rate.py --batch` → `ecore_breathing_rate.py` · iOS: `NightBreathing` → `EcoreBreathing.swift`) |
 | **Breathing disturbances** (ODI = % of sleep epochs flagged, events/h, NREM/REM split) | `sleepSection` "Breathing disturbances" grid | Today tab card → `BreathingDetail` (InsightsView.swift) | `nights[].breathing` | SleepNet-BDI (web: `run_bdi_model.py --batch` · iOS: `BreathingModel`) |
 | **Daytime stress** (stressed / neutral / restored minutes per day, per-reading chart, baselines) | `renderStress` "Daytime stress" panel | Today tab card → `StressDetail` (InsightsView.swift) | top-level `stress` | stress_daytime_sensing (web: `run_stress_model.py --json` · iOS: `StressModel`) |
+| **Symptom Radar** (NO / MINOR / MAJOR signs + the four biomarkers) and **"may be getting sick" alert** (once per day and level) | `renderIllness` + `notifyIllness` (browser notification) | `IllnessCard` / Today `radarCard` → `SymptomRadarDetail`; `IllnessAlert` (local notification) | top-level `illness` | illness_detection_0_5_1 (web: `run_illness_model.py` · iOS: `IllnessModel`) |
 | **Cardiovascular age** | `renderCardio` | Cardio section | `cardio` | CVA (web: Python · iOS: `CvaModel`) |
 | **VO₂max estimate** | `renderCardio` | Fitness section | `fitness.vo2max` | — (Jackson, model-free) |
 | Movement ridge | `ridgeSvg` | `MovementRidge` | `activity_profile` | — (MET, model-free) |
@@ -206,8 +208,12 @@ client re-derives packet timing at all — tracked as a follow-up.
 
 ## Known gaps (iOS-only, not yet on the web)
 
-Now on both: the model-free Symptom Radar (`symptoms`, used when the Python runner
-has no `illness`) and the ring-clock warnings (`clock.warnings`). Still iOS-only:
+Now on both: the ring-clock warnings (`clock.warnings`). The model-free Symptom Radar
+(`symptoms`) was removed: the radar comes only from Oura's illness model. Still iOS-only:
+
+- **Sickness alerts in the background**: iOS posts its Symptom Radar notification from
+  the background sync (`IllnessAlert`, called from `SummaryCache.save`); the web's
+  `notifyIllness` can only fire while the dashboard tab is open.
 
 - **Sleep report without a hypnogram**: iOS still draws the time-in-bed strip and the
   signal lanes; the web returns early.

@@ -16,7 +16,6 @@ pub mod hourly_hr;
 pub mod research_export;
 pub mod ring_time;
 pub mod sleep_score;
-pub mod symptoms;
 
 /// An unanchored ring-clock epoch at least this long is worth a warning.
 const UNANCHORED_WARN_H: f64 = 12.0;
@@ -92,6 +91,9 @@ pub struct ModelOutputs {
     pub illness: Option<Value>,     // run_illness_model.py (Symptom Radar)
     pub breathing: Option<Value>,   // run_bdi_model.py --batch (one entry or null per sleep range)
     pub stress: Option<Value>,      // run_stress_model.py --json (daytime stress days + samples)
+    /// run_breathing_rate.py --batch: Oura's ecore nightly breathing rate (one entry or
+    /// null per sleep range). Replaces the ring's per-window values for `breath_rate`.
+    pub breath_rate: Option<Value>,
 }
 
 /// Runs the torch models. `oura-cli` shells out to Python; the native client runs
@@ -1858,6 +1860,7 @@ pub fn build_summary(
         illness,
         breathing,
         stress,
+        breath_rate: ecore_breath,
     } = runner.run(ModelInputs {
         db,
         tz,
@@ -1873,6 +1876,19 @@ pub fn build_summary(
             arr.iter()
                 .filter_map(|b| {
                     Some(((b["start_ds"].as_i64()?, b["captured_unix"].as_i64()?), b.clone()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // Oura's ecore breathing rate per night, keyed the same way.
+    let ecore_breath_by_night: std::collections::HashMap<(i64, i64), f64> = ecore_breath
+        .as_ref()
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|b| {
+                    let rate = b["breath_rate"].as_f64().filter(|r| *r > 0.0)?;
+                    Some(((b["start_ds"].as_i64()?, b["captured_unix"].as_i64()?), rate))
                 })
                 .collect()
         })
@@ -1929,8 +1945,6 @@ pub fn build_summary(
     let mut nights_json = Vec::new();
     let mut asleep_by_day: std::collections::BTreeMap<i64, i32> = Default::default();
     let mut incomplete_sleep_days = std::collections::BTreeSet::new();
-    // (wake date, biomarkers) per night, oldest first — the Symptom Radar input.
-    let mut nightly_biomarkers: Vec<(String, symptoms::NightBiomarkers)> = Vec::new();
     // Causal personal baselines for the sleep score's physiology component: for each
     // main sleep (>= MIN_BASELINE_SLEEP_DS), only strictly preceding main-sleep nights
     // (`end_unix <= start_unix`) in resolved chronological order may contribute. Naps
@@ -2012,7 +2026,10 @@ pub fn build_summary(
         let raw_mean_hrv = mean(&nt.rmssd);
         let night_rhr = raw_lowest_hr.map(|x| x.round());
         let night_hrv = raw_mean_hrv.map(|x| x.round());
-        let night_breath = median_of(&nt.breath);
+        // Oura's ecore nightly breathing rate when the runner produced it (what the Oura
+        // app shows); otherwise the median of the ring's own per-window values.
+        let ecore_breath = ecore_breath_by_night.get(&(nt.start_ds, nt.captured_unix)).copied();
+        let night_breath = ecore_breath.or_else(|| median_of(&nt.breath));
         let is_main_sleep = (nt.end_ds - nt.start_ds) >= sleep_score::MIN_BASELINE_SLEEP_DS;
         let rhr_baseline = if is_main_sleep {
             let priors: Vec<f64> = prior_main_rhr
@@ -2034,7 +2051,6 @@ pub fn build_summary(
         } else {
             None
         };
-        let wake_ymd = Some(ymd_label(end_unix, tz));
         // The official app's main hypnogram: the 30 s stages folded into 5-minute
         // blocks (Android `SleepPhaseConverter.aggregate30SecTo5Min`).
         let stages_5min = (!full_stages.is_empty())
@@ -2124,6 +2140,8 @@ pub fn build_summary(
                 age: demo.age,
             }) } else { Value::Null },
             "breath_rate": night_breath.map(|b| (b * 10.0).round() / 10.0),
+            "breath_rate_source": if ecore_breath.is_some() { json!("ecore") }
+                else if night_breath.is_some() { json!("ring") } else { Value::Null },
         });
         night_json["stages_5min"] = json!(stages_5min);
         night_json["stages_t0_unix"] = json!(stages_t0_unix);
@@ -2136,34 +2154,11 @@ pub fn build_summary(
                 prior_main_hrv.push((end_unix, hrv_mean));
             }
         }
-        if let Some(day) = wake_ymd.clone() {
-            nightly_biomarkers.push((
-                day,
-                symptoms::NightBiomarkers {
-                    skin_temp: nightly_skin_temp(&nt.temp),
-                    lowest_hr: night_rhr,
-                    hrv_ms: night_hrv,
-                    breath_rate: night_breath,
-                },
-            ));
-        }
     }
     nights_json.reverse();
 
     asleep_by_day.retain(|day, _| !incomplete_sleep_days.contains(day));
     let sleep_debt = sleep_debt_summary(&asleep_by_day);
-
-    // Symptom signs for the most recent night, judged against the nights before it.
-    // `nights` is oldest-first, so the last entry is tonight and everything before it
-    // is the baseline — tonight is deliberately excluded from its own comparison.
-    let symptoms = match nightly_biomarkers.split_last() {
-        Some(((date, tonight), history)) => {
-            let history: Vec<symptoms::NightBiomarkers> =
-                history.iter().map(|(_, marks)| *marks).collect();
-            symptoms::symptom_signs(*tonight, &history, date)
-        }
-        None => Value::Null,
-    };
 
     let activity = activity_raw
         .as_ref()
@@ -2535,10 +2530,8 @@ pub fn build_summary(
         "profile": demo.to_json(),
         "nights": nights_json,
         "sleep_debt": sleep_debt,
-        // Model-free Symptom Radar: the same four biomarkers the torch illness model
-        // eats, judged against the wearer's own baseline. Same JSON shape as
-        // IllnessResult so one card renders either source.
-        "symptoms": symptoms,
+        // Symptom Radar comes only from Oura's illness_detection model (the Python
+        // runner here, IllnessModel.swift on iOS); there is no model-free fallback.
         "illness": illness,
         "stress": stress,
         "cardio": cva,

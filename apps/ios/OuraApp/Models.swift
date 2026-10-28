@@ -80,8 +80,11 @@ struct NightRow: Codable, Identifiable {
     var series: NightSeries? = nil
     var series_t: NightTimedSeries? = nil
     var autonomic: StageAutonomic? = nil
-    /// Nightly respiratory rate (breaths/min), the ring's own per-window estimate.
+    /// Nightly respiratory rate (breaths/min).
     var breath_rate: Double? = nil
+    /// "ecore" (Oura's nightly calculation, EcoreBreathing) or "ring" (median of the
+    /// ring's per-window values, used until the ecore pass has run).
+    var breath_rate_source: String? = nil
     var sleep_score: SleepScore? = nil
     /// Oura's SleepNet-BDI result (web: `nights[].breathing`; iOS: BreathingModel).
     var breathing: Breathing? = nil
@@ -372,9 +375,6 @@ struct Summary: Codable {
     var sleepDebt: SleepDebtSummary?
     var illness: IllnessResult?           // on-device only (torch Symptom Radar; not in the JSON)
     var stress: DaytimeStress?            // on-device only (torch daytime stress; not in the JSON)
-    /// Model-free Symptom Radar from the shared core — same biomarkers, same shape,
-    /// judged against your own baseline. Used when the torch model is not present.
-    var symptoms: IllnessResult?
     var workouts: [WorkoutSession] = []   // on-device only (not in the JSON)
     var modelErrors: [String] = []        // on-device model failures (not in the JSON)
     var error: String?
@@ -383,7 +383,6 @@ struct Summary: Codable {
     enum CodingKeys: String, CodingKey {
         case analysis_digest, analysis_version
         case digest, device, nights, clock, vitals, activity_profile, activity_daily, activity_slots, profile, cardio, fitness, error
-        case symptoms
         case sleepDebt = "sleep_debt"
     }
     init() {}
@@ -407,7 +406,6 @@ struct Summary: Codable {
         cardio = try? c.decodeIfPresent(Cardio.self, forKey: .cardio)
         fitness = try? c.decodeIfPresent(Fitness.self, forKey: .fitness)
         sleepDebt = try? c.decodeIfPresent(SleepDebtSummary.self, forKey: .sleepDebt)
-        symptoms = try? c.decodeIfPresent(IllnessResult.self, forKey: .symptoms)
         error = try? c.decodeIfPresent(String.self, forKey: .error)
     }
     /// recent days (newest first) that have a movement profile.
@@ -415,11 +413,11 @@ struct Summary: Codable {
 }
 
 extension Summary {
-    /// Whichever Symptom Radar this build has: the on-device torch model when the
-    /// `.ptl` is bundled, the shared core's baseline comparison otherwise.
+    /// Symptom Radar from Oura's on-device illness model (torch build with the `.ptl`
+    /// bundled). There is no model-free fallback: without the model there is no radar.
     var symptomRadar: IllnessResult? {
         if let illness, illness.available { return illness }
-        return symptoms
+        return nil
     }
 
     // The calendar date you WOKE from a night. Nights are labelled by onset date (the

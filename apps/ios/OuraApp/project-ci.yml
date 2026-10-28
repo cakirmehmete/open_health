@@ -42,6 +42,8 @@ targets:
       - path: OuraApp.swift
       - path: Models.swift
       - path: Core.swift
+      - path: IllnessAlert.swift
+      - path: EcoreBreathing.swift
       - path: WorkCoordinator.swift
       - path: Components.swift
       - path: Reports.swift

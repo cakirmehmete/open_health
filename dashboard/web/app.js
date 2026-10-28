@@ -458,19 +458,16 @@ const cvaMissing = (d) => {
 function renderIllness(d) {
   const box = $("illness");
   box.innerHTML = "";
-  // Oura's model when the Python runner produced it, otherwise the shared core's
-  // model-free radar (same choice as the iOS app's `symptomRadar`).
-  const fromModel = !!d.illness?.available;
-  const ill = fromModel ? d.illness : (d.symptoms || d.illness);
-  if (!ill) { box.append(el("div", "error", "Symptom radar needs a few nights of sleep data.")); return; }
-  // The runner emits snake_case, the core camelCase.
+  // Only Oura's illness_detection model (tools/run_illness_model.py); no model-free
+  // fallback, so without the runner the card says what it needs.
+  const ill = d.illness;
+  if (!ill) { box.append(el("div", "error", "Symptom radar needs Oura's illness model (Python + tools/run_illness_model.py).")); return; }
+  // The runner emits snake_case; accept camelCase too.
   const trafficLight = ill.traffic_light ?? ill.trafficLight;
   const daysWithData = ill.days_with_data ?? ill.daysWithData;
   if (!ill.available) {
     const why = ill.status === "MISSING_LAST_NIGHT_SLEEP" ? "Last night's sleep is missing — wear the ring overnight and sync."
-      : ill.status === "MISSING_SLEEP_DATA" ? (fromModel || d.illness
-        ? "Too many recent nights are missing (needs ≥ 7 of the last 14)."
-        : "Needs at least 7 nights of sleep to learn your baseline.")
+      : ill.status === "MISSING_SLEEP_DATA" ? "Too many recent nights are missing (needs ≥ 7 of the last 14)."
       : "Not enough history yet.";
     box.append(el("div", "error", why));
     return;
@@ -499,8 +496,29 @@ function renderIllness(d) {
     }
     box.append(list);
   }
-  const basis = fromModel ? `On-device illness model · ${daysWithData} of 30 days` : `Compared with your own baseline · ${daysWithData} nights`;
-  box.append(el("div", "il-foot", `${basis} · ${esc(ill.date)}`));
+  box.append(el("div", "il-foot", `On-device illness model · ${daysWithData} of 30 days · ${esc(ill.date)}`));
+  notifyIllness(ill, trafficLight, flagged);
+}
+
+// "You may be getting sick": a browser notification the first time a date reaches
+// MINOR or MAJOR signs (again if it escalates to MAJOR). Same rule as the iOS app's
+// IllnessAlert. Only fires while the dashboard is open; the phone covers background.
+function notifyIllness(ill, trafficLight, flagged) {
+  const rank = { MINOR_SIGNS: 1, MAJOR_SIGNS: 2 }[trafficLight];
+  if (!rank || !("Notification" in window)) return;
+  let last;
+  try { last = JSON.parse(localStorage.getItem("illness-alert") || "null"); } catch { last = null; }
+  if (last && last.date === ill.date && last.rank >= rank) return;
+  const send = () => {
+    const names = flagged.map((b) => (BIOMARKER_LABEL[b.type] || b.type).toLowerCase());
+    const body = (rank === 2 ? "Major signs: your body may be fighting something." : "Minor signs: a few biometrics are outside your usual range.")
+      + (names.length ? ` ${names.join(", ")} ${names.length === 1 ? "is" : "are"} off your baseline.` : "")
+      + " Consider an easy day.";
+    new Notification("Symptom radar", { body, tag: "illness-" + ill.date });
+    try { localStorage.setItem("illness-alert", JSON.stringify({ date: ill.date, rank })); } catch {}
+  };
+  if (Notification.permission === "granted") send();
+  else if (Notification.permission === "default") Notification.requestPermission().then((p) => { if (p === "granted") send(); });
 }
 
 // Daytime stress: Oura's stress_daytime_sensing model on each calm, awake RMSSD reading

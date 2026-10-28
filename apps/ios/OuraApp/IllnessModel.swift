@@ -1,6 +1,5 @@
 #if TORCH
 import Foundation
-// sqlite3 comes from the bridging header (TorchBridge.h includes <sqlite3.h>)
 
 // On-device Symptom Radar: assemble the 30-day biometric matrix + long-term baselines
 // the illness-detection model expects and run illness_detection_0_5_1 via the LibTorch
@@ -8,83 +7,26 @@ import Foundation
 // docs/algorithms/illness-detection.md for the full I/O contract). The model bakes in
 // all normalization / calibration / thresholds — we feed raw physiological values.
 //
-// HR/HRV come from the ring's own hrv_event (5-min rmssd_ms + hr_bpm); breathing rate
-// is reconstructed from the IBI stream (respiratory sinus arrhythmia), matching the
-// Python runner's respiratory_rate.py.
+// HR/HRV come from the ring's own hrv_event (5-min rmssd_ms + hr_bpm); breathing rate is
+// Oura's ecore nightly calculation (EcoreBreathing via NightBreathing, keyed by wake day),
+// as tools/run_illness_model.py takes it from run_breathing_rate.py.
 enum IllnessModel {
     private static var modelName: String? { ModelFiles.find("illness_detection")?.name }
+    /// The cache key also names the breathing input, so results from the old IBI
+    /// reconstruction are never reused for ecore breathing.
+    private static var cacheModel: String? { modelName.map { $0 + "|breath-ecore" } }
 
     static let nDays = 30
-    private static let ibiTags: Set<Int> = [0x44, 0x60, 0x71]
     private static let tempTags: Set<Int> = [0x46, 0x69, 0x75]
     private static let day = 86400.0
 
     struct Nightly { var breath, avgHr, lowHr, hrv, skinTemp, dur: Double }
 
-    /// Disposable indexed workspace: parse historical IBI once, retain only one
-    /// night's values in RAM. It is never a source of truth or a model result cache.
-    final class IBIWorkspace {
-        private var db: OpaquePointer?
-        private var insert: OpaquePointer?
-        private var closed = false
-        private let url = FileManager.default.temporaryDirectory.appendingPathComponent("oura-illness-ibi.sqlite")
-        init() throws {
-            let fm = FileManager.default
-            try? fm.removeItem(at: url) // remove an abandoned previous pass under WorkGate
-            guard sqlite3_open(url.path, &db) == SQLITE_OK else { let e = failure(); close(); throw e }
-            do {
-                if let protection = try? fm.attributesOfItem(atPath: DB.readPath())[.protectionKey] {
-                    try fm.setAttributes([.protectionKey: protection], ofItemAtPath: url.path)
-                }
-                sqlite3_progress_handler(db, 10000, { _ in AnalysisRun.cancelled ? 1 : 0 }, nil)
-                try execute("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-2048; PRAGMA temp_store=FILE; CREATE TABLE ibi(id INTEGER PRIMARY KEY,t REAL,v REAL); BEGIN;")
-                guard sqlite3_prepare_v2(db, "INSERT INTO ibi(t,v) VALUES (?,?)", -1, &insert, nil) == SQLITE_OK else { throw failure() }
-            } catch { close(); throw error }
-        }
-        deinit { close() }
-        private func failure() -> Error {
-            EventStore.ReadError.step("IBI workspace sqlite=\(sqlite3_errcode(db)) extended=\(sqlite3_extended_errcode(db))")
-        }
-        private func execute(_ sql: String) throws {
-            guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else { throw failure() }
-        }
-        func append(time: Double, value: Double) throws {
-            sqlite3_bind_double(insert, 1, time); sqlite3_bind_double(insert, 2, value)
-            guard sqlite3_step(insert) == SQLITE_DONE else { throw failure() }
-            sqlite3_reset(insert)
-        }
-        func finish() throws {
-            sqlite3_finalize(insert); insert = nil
-            try execute("COMMIT; CREATE INDEX ibi_time ON ibi(t);")
-        }
-        func values(start: Double, end: Double) throws -> (times: [Double], values: [Double]) {
-            var statement: OpaquePointer?
-            guard sqlite3_prepare_v2(db, "SELECT t,v FROM ibi WHERE t>=? AND t<=? ORDER BY id", -1, &statement, nil) == SQLITE_OK else { throw failure() }
-            defer { sqlite3_finalize(statement) }
-            sqlite3_bind_double(statement, 1, start); sqlite3_bind_double(statement, 2, end)
-            var times: [Double] = [], values: [Double] = []
-            var rc = sqlite3_step(statement)
-            while rc == SQLITE_ROW {
-                try AnalysisRun.check()
-                times.append(sqlite3_column_double(statement, 0)); values.append(sqlite3_column_double(statement, 1))
-                rc = sqlite3_step(statement)
-            }
-            guard rc == SQLITE_DONE else { throw failure() }
-            return (times, values)
-        }
-        func close() {
-            guard !closed else { return }; closed = true
-            sqlite3_finalize(insert); insert = nil
-            sqlite3_close(db); db = nil
-            try? FileManager.default.removeItem(at: url)
-        }
-    }
-
     /// Same rows and anchors as the last complete run: the answer cannot differ, so
     /// return it without the full-history IBI ingest (the slowest stage of a launch).
     static func cachedRun(profile: Profile?, storeDigest: String?) -> (result: IllnessResult?, error: String?)? {
         guard let storeDigest else { return nil }
-        let cacheKey = ModelCacheStore.globalKey(profile: profile, model: modelName)
+        let cacheKey = ModelCacheStore.globalKey(profile: profile, model: cacheModel)
         guard ModelCacheStore.loadDigest(ModelCacheStore.illnessFile, globalKey: cacheKey) == storeDigest else { return nil }
         let cached: [String: FingerprintedEntry<IllnessResult>] = ModelCacheStore.load(ModelCacheStore.illnessFile, globalKey: cacheKey)
         dlog("models", "illness cache=digest-hit")
@@ -94,21 +36,19 @@ enum IllnessModel {
         return (cached["result"]?.value, nil)
     }
 
-    static func run(profile: Profile?, events: EventStore.Events,
-                    clock: EventStore.RingClock, knownDigest: String? = nil) -> (result: IllnessResult?, error: String?) {
+    /// `breathByWake`: Oura's ecore nightly breathing rate per wake date ("yyyy-mm-dd").
+    static func run(profile: Profile?, events: EventStore.Events, clock: EventStore.RingClock,
+                    breathByWake: [String: Double], knownDigest: String? = nil) -> (result: IllnessResult?, error: String?) {
         guard let modelPath = ModelFiles.find("illness_detection")?.path
         else { return (nil, "illness model file missing from the app bundle") }
         guard !events.isEmpty else { return (nil, nil) }
-        let cacheKey = ModelCacheStore.globalKey(profile: profile, model: modelName)
+        let cacheKey = ModelCacheStore.globalKey(profile: profile, model: cacheModel)
         let storeDigest = knownDigest ?? events.digest()
         if let hit = cachedRun(profile: profile, storeDigest: storeDigest) { return hit }
         func u(_ ds: Int64, _ cu: Int64) -> Double { clock.unixSeconds(ds, capturedUnix: cu) }
         func dated(_ ds: Int64, _ cu: Int64) -> Bool { clock.datedUnixSeconds(ds, capturedUnix: cu) != nil }
         let tz = Double(TimeZone.current.secondsFromGMT())
 
-        let ibi: IBIWorkspace
-        do { ibi = try IBIWorkspace() } catch { return (nil, "\(error)") }
-        defer { ibi.close() }
         // ── gather raw signals with absolute times ────────────────────────────
         var hrvT: [Double] = [], hrvR: [Double] = [], hrvH: [Double] = []
         var tempT: [Double] = [], tempV: [Double] = []
@@ -116,8 +56,7 @@ enum IllnessModel {
         var sed: [Int: Double] = [:], rest: [Int: Double] = [:]
 
         // The model looks at the last 30 wake days. Find that window first from the
-        // (few) bedtime markers so the full-history IBI stream — millions of beats —
-        // is only ingested for the days that can matter.
+        // (few) bedtime markers so older history is skipped.
         var latestWake: Int?
         for e in events.restricted("tag=118") where dated(e.ds, e.cu) {
             if let s = (e.json["bedtime_start_ds"] as? NSNumber)?.int64Value,
@@ -135,24 +74,12 @@ enum IllnessModel {
         let cutoff = Double(latestWake - nDays - 2) * self.day - tz  // one extra day: activity is lagged
         // Only the tags below feed the model; letting SQLite skip the rest avoids
         // decoding two million rows of unrelated JSON.
-        let relevant = events.restricted("tag IN (68,96,113,93,70,105,117,118,80)")
+        let relevant = events.restricted("tag IN (93,70,105,117,118,80)")
         for e in relevant {
             // Undated data (an untrustworthy boot clock) belongs to no night or day,
             // and anything before the window cannot change the result.
             guard dated(e.ds, e.cu), u(e.ds, e.cu) >= cutoff else { continue }
             switch e.tag {
-            case let t where ibiTags.contains(t):
-                guard let values = e.json["ibi_ms"] as? [Any] else { continue }
-                let base = u(e.ds, e.cu)
-                var acc = 0.0
-                for value in values {
-                    let v = (value as? NSNumber)?.doubleValue ?? 0
-                    if v > 0 {
-                        acc += v / 1000
-                        do { try ibi.append(time: base + acc, value: v) }
-                        catch { return (nil, "\(error)") }
-                    }
-                }
             case 0x5D:  // hrv_event: 5-min avg RMSSD + HR
                 guard let rm = e.json["rmssd_ms"] as? [Any] else { continue }
                 let hb = e.json["hr_bpm"] as? [Any] ?? []
@@ -195,8 +122,6 @@ enum IllnessModel {
 
         guard !AnalysisRun.cancelled, events.error == nil else { return (nil, "analysis interrupted") }
 
-        do { try ibi.finish() } catch { return (nil, "\(error)") }
-
         // ── per wake-day nightly biometrics (longest sleep wins) ──────────────
         var perDay: [Int: Nightly] = [:]
         for w in windows {
@@ -209,14 +134,8 @@ enum IllnessModel {
             let rmssd = median(hIdx.map { hrvR[$0] })
             let hrs = hIdx.map { hrvH[$0] }.filter { $0.isFinite }
             if hrs.count < 3 { continue }
-            let nightIBI: (times: [Double], values: [Double])
-            do { nightIBI = try ibi.values(start: w.start, end: w.end) }
-            catch { return (nil, "\(error)") }
-            let ibiT = nightIBI.times, ibiV = nightIBI.values
-            let iIdx = indicesInRange(ibiT, w.start, w.end)
-            let breath = iIdx.count > 200
-                ? respiratoryRate(iIdx.map { ibiT[$0] }, iIdx.map { ibiV[$0] })
-                : Double.nan
+            let (wy, wm, wd) = civil(wakeDay)
+            let breath = breathByWake[String(format: "%04d-%02d-%02d", wy, wm, wd)] ?? .nan
             let tIdx = indicesInRange(tempT, w.start, w.end)
             let skin = tIdx.isEmpty ? Double.nan : median(tIdx.map { tempV[$0] })
             let n = Nightly(breath: breath, avgHr: median(hrs), lowHr: hrs.min() ?? .nan,
@@ -325,98 +244,6 @@ enum IllnessModel {
         dlog("models", "illness cache=miss")
         return (result, nil)
     }
-
-    // ── respiratory rate (RSA) — port of tools/respiratory_rate.py ────────────
-    private static let fs = 4.0, respLo = 0.15, respHi = 0.40, winS = 60.0, stepS = 30.0
-
-    static func respiratoryRate(_ ts: [Double], _ ibi: [Double]) -> Double {
-        // ectopic filter: physiological range + within 30% of median
-        var t: [Double] = [], v: [Double] = []
-        for (i, x) in ibi.enumerated() where x >= 300 && x <= 2000 { t.append(ts[i]); v.append(x) }
-        if v.count < 30 { return .nan }
-        let med = median(v)
-        var t2: [Double] = [], v2: [Double] = []
-        for (i, x) in v.enumerated() where abs(x - med) <= 0.30 * med { t2.append(t[i]); v2.append(x) }
-        if v2.count < 30 || (t2.last! - t2.first!) < winS { return .nan }
-        // 4 Hz resample (linear interp on the IBI tachogram)
-        let span = t2.last! - t2.first!
-        // A mis-dated bedtime (ring reboot on a long hike) can span days and
-        // allocate tens of millions of samples. Cap at an implausible night.
-        if span > 18 * 3600 { return .nan }
-        let n = Int(span * fs)
-        if n < Int(winS * fs) { return .nan }
-        var x = [Double](repeating: 0, count: n)
-        var j = 0
-        for k in 0..<n {
-            let tk = t2.first! + Double(k) / fs
-            while j < t2.count - 2 && t2[j + 1] < tk { j += 1 }
-            let t0 = t2[j], t1 = t2[j + 1]
-            let f = t1 > t0 ? (tk - t0) / (t1 - t0) : 0
-            x[k] = v2[j] + (v2[j + 1] - v2[j]) * f
-        }
-        x = bandpass(x)
-        // per-window dominant respiratory frequency (direct DFT scan over the band)
-        let win = Int(winS * fs), hop = Int(stepS * fs)
-        var rr: [Double] = []
-        var i = 0
-        while i + win <= x.count {
-            if let f = dominantFreq(Array(x[i..<i + win])) { rr.append(f * 60.0) }
-            i += hop
-        }
-        return rr.count >= 3 ? median(rr) : .nan
-    }
-
-    // windowed-sinc respiratory band-pass (scipy-free; matches the Python fallback)
-    private static func bandpass(_ x: [Double]) -> [Double] {
-        let mean = x.reduce(0, +) / Double(x.count)
-        let centered = x.map { $0 - mean }
-        let n = 129
-        var kern = [Double](repeating: 0, count: n)
-        for i in 0..<n {
-            let t = Double(i) - Double(n - 1) / 2
-            let lo = 2 * respLo / fs * sinc(2 * respLo / fs * t)
-            let hi = 2 * respHi / fs * sinc(2 * respHi / fs * t)
-            let hann = 0.5 - 0.5 * cos(2 * .pi * Double(i) / Double(n - 1))
-            kern[i] = (hi - lo) * hann
-        }
-        let km = kern.reduce(0, +) / Double(n)
-        for i in 0..<n { kern[i] -= km }
-        // 'same' convolution
-        var out = [Double](repeating: 0, count: centered.count)
-        let half = n / 2
-        for i in 0..<centered.count {
-            var acc = 0.0
-            for k in 0..<n {
-                let idx = i + k - half
-                if idx >= 0 && idx < centered.count { acc += centered[idx] * kern[k] }
-            }
-            out[i] = acc
-        }
-        return out
-    }
-
-    // dominant frequency in [respLo, respHi] via a direct DFT scan; nil if no clear peak
-    private static func dominantFreq(_ seg: [Double]) -> Double? {
-        let m = seg.reduce(0, +) / Double(seg.count)
-        let win = (0..<seg.count).map { 0.5 - 0.5 * cos(2 * .pi * Double($0) / Double(seg.count - 1)) }
-        let s = (0..<seg.count).map { (seg[$0] - m) * win[$0] }
-        var freqs: [Double] = [], powers: [Double] = []
-        var f = respLo
-        while f <= respHi {
-            var re = 0.0, im = 0.0
-            for k in 0..<s.count {
-                let a = 2 * .pi * f * Double(k) / fs
-                re += s[k] * cos(a); im -= s[k] * sin(a)
-            }
-            freqs.append(f); powers.append(re * re + im * im)
-            f += 0.005
-        }
-        guard let maxP = powers.max(), let mi = powers.firstIndex(of: maxP) else { return nil }
-        if maxP < 4.0 * median(powers) { return nil }  // require a real peak
-        return freqs[mi]
-    }
-
-    private static func sinc(_ x: Double) -> Double { x == 0 ? 1 : sin(.pi * x) / (.pi * x) }
 
     // ── helpers ───────────────────────────────────────────────────────────────
     private static func indicesInRange(_ ts: [Double], _ lo: Double, _ hi: Double) -> [Int] {
