@@ -12,6 +12,8 @@ import Foundation
 // is reconstructed from the IBI stream (respiratory sinus arrhythmia), matching the
 // Python runner's respiratory_rate.py.
 enum IllnessModel {
+    private static var modelName: String? { ModelFiles.find("illness_detection")?.name }
+
     static let nDays = 30
     private static let ibiTags: Set<Int> = [0x44, 0x60, 0x71]
     private static let tempTags: Set<Int> = [0x46, 0x69, 0x75]
@@ -82,7 +84,7 @@ enum IllnessModel {
     /// return it without the full-history IBI ingest (the slowest stage of a launch).
     static func cachedRun(profile: Profile?, storeDigest: String?) -> (result: IllnessResult?, error: String?)? {
         guard let storeDigest else { return nil }
-        let cacheKey = ModelCacheStore.globalKey(profile: profile)
+        let cacheKey = ModelCacheStore.globalKey(profile: profile, model: modelName)
         guard ModelCacheStore.loadDigest(ModelCacheStore.illnessFile, globalKey: cacheKey) == storeDigest else { return nil }
         let cached: [String: FingerprintedEntry<IllnessResult>] = ModelCacheStore.load(ModelCacheStore.illnessFile, globalKey: cacheKey)
         dlog("models", "illness cache=digest-hit")
@@ -94,10 +96,10 @@ enum IllnessModel {
 
     static func run(profile: Profile?, events: EventStore.Events,
                     clock: EventStore.RingClock, knownDigest: String? = nil) -> (result: IllnessResult?, error: String?) {
-        guard let modelPath = Bundle.main.path(forResource: "illness_detection_0_5_1", ofType: "ptl")
+        guard let modelPath = ModelFiles.find("illness_detection")?.path
         else { return (nil, "illness model file missing from the app bundle") }
         guard !events.isEmpty else { return (nil, nil) }
-        let cacheKey = ModelCacheStore.globalKey(profile: profile)
+        let cacheKey = ModelCacheStore.globalKey(profile: profile, model: modelName)
         let storeDigest = knownDigest ?? events.digest()
         if let hit = cachedRun(profile: profile, storeDigest: storeDigest) { return hit }
         func u(_ ds: Int64, _ cu: Int64) -> Double { clock.unixSeconds(ds, capturedUnix: cu) }
@@ -156,10 +158,12 @@ enum IllnessModel {
                 let hb = e.json["hr_bpm"] as? [Any] ?? []
                 let step = ((e.json["interval_min"] as? NSNumber)?.doubleValue ?? 5) * 60.0
                 let base = u(e.ds, e.cu)
+                // Stamped at the LAST average; earlier ones walk back by `step`, as
+                // tools/run_illness_model.py does (walking forward shifted HRV late).
                 for (i, x) in rm.enumerated() {
                     let r = (x as? NSNumber)?.doubleValue ?? 0
                     if r > 0 {
-                        hrvT.append(base + Double(i) * step)
+                        hrvT.append(base - Double(rm.count - 1 - i) * step)
                         hrvR.append(r)
                         hrvH.append(i < hb.count ? ((hb[i] as? NSNumber)?.doubleValue ?? .nan) : .nan)
                     }

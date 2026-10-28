@@ -90,6 +90,8 @@ pub struct ModelOutputs {
     pub cva: Option<Value>,         // run_cva_model.py
     pub activity: Option<Value>,    // run_activity_model.py
     pub illness: Option<Value>,     // run_illness_model.py (Symptom Radar)
+    pub breathing: Option<Value>,   // run_bdi_model.py --batch (one entry or null per sleep range)
+    pub stress: Option<Value>,      // run_stress_model.py --json (daytime stress days + samples)
 }
 
 /// Runs the torch models. `oura-cli` shells out to Python; the native client runs
@@ -2420,6 +2422,8 @@ pub fn build_summary(
         cva,
         activity: activity_raw,
         illness,
+        breathing,
+        stress,
     } = runner.run(ModelInputs {
         db,
         tz,
@@ -2427,6 +2431,18 @@ pub fn build_summary(
         sleep_ranges: &sleep_ranges,
     });
 
+    // SleepNet-BDI per night, keyed like the hypnograms (start_ds, captured_unix).
+    let breathing_by_night: std::collections::HashMap<(i64, i64), Value> = breathing
+        .as_ref()
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|b| {
+                    Some(((b["start_ds"].as_i64()?, b["captured_unix"].as_i64()?), b.clone()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let mut hyps: std::collections::HashMap<(i64, i64), Value> = sleep_batch
         .as_ref()
         .and_then(|v| v.as_array())
@@ -2672,6 +2688,9 @@ pub fn build_summary(
             // mean HR/HRV per sleep stage (deep/light/rem) — deep-sleep HRV is the
             // recovery-relevant number; null when there's no hypnogram.
             "autonomic": autonomic,
+            // Oura's SleepNet-BDI breathing disturbances (null without the model):
+            // odi_pct = % of sleep epochs flagged, events_per_hour, status 1 = ok.
+            "breathing": breathing_by_night.get(&(nt.start_ds, nt.captured_unix)),
             // A score whose every threshold traces to a paper rather than to a fit
             // against Oura's own number. See `sleep_score`.
             "sleep_score": if complete_staging { sleep_score::score_night(sleep_score::NightInput {
@@ -3144,6 +3163,7 @@ pub fn build_summary(
         // IllnessResult so one card renders either source.
         "symptoms": symptoms,
         "illness": illness,
+        "stress": stress,
         "cardio": cva,
         "fitness": { "vo2max": (vo2max * 10.0).round() / 10.0 },
         "activity": activity,

@@ -18,4 +18,15 @@ int oura_stepmotion(const char *path, const int64_t *ts, const float *raw,
                     int n, int64_t *out_ts, float *out, int cap) { return -1; }
 int oura_illness(const char *path, const float *series, const float *scalars,
                  double *score, int *decision, float *biomarkers) { return -1; }
+int oura_bdi(const char *path, int64_t start, int64_t end, const int64_t *ts, const float *val,
+             int n, float *metrics, int *epochs, int *flagged) { return -1; }
+int oura_energy(const char *path, const float *demo, const float *details, int64_t start, int64_t end,
+                const int64_t *mt, const float *m, int nm, const int64_t *ot, const float *o, int no,
+                const int64_t *st, const float *s, int ns, const int64_t *ht, const float *h, int nh,
+                const int64_t *tt, const float *t, int nt, double *out) { return -1; }
+int oura_stress(const char *path, float dhrv, double ts, const double *bs, const double *be, int nb,
+                float dhrv_base, float night_base, float met, float *out) { return -1; }
+int oura_step_counter(const char *path, const int64_t *st, const float *s, int ns,
+                      const int64_t *mt, const float *m, int nm,
+                      int64_t *out_start, float *out_steps, int cap) { return -1; }
 void oura_torch_release(void) {}

@@ -132,6 +132,25 @@ final class HealthExportTests: XCTestCase {
         XCTAssertEqual(estimated.map(\.to), [2, 6, 8, 9])
     }
 
+    func testWorkoutMetKcalCoversOnlyModelScoredWorkoutMinutes() {
+        var s = Summary()
+        s.profile = Profile(sex: "M", age: 30, height_m: 1.8, weight_kg: 80, ring_size: 10)
+        var profile = [Double](repeating: 0, count: 96)
+        profile[40] = 4  // 10:00-10:15
+        profile[41] = 2  // 10:15-10:30
+        s.activity_profile = ["2026-10-26": profile]
+        var walk = WorkoutSession(start: "2026-10-26 10:00", end: "10:30", durationMin: 30, label: "walking", isWorkout: 0.9)
+        walk.kcal = 120
+        // A workout without the model's calories keeps its minutes in the daily sample.
+        let other = WorkoutSession(start: "2026-10-26 10:15", end: "10:30", durationMin: 15, label: "running", isWorkout: 0.9)
+        s.workouts = [walk, other]
+        let trims = HealthExport.workoutMetKcal(s)
+        // (4 MET x 80 kg x 0.25 h) + (2 MET x 80 kg x 0.25 h)
+        XCTAssertEqual(trims["2026-10-26"]?.reduce(0, +) ?? 0, 120, accuracy: 0.001)
+        XCTAssertEqual(trims["2026-10-26"]?[40] ?? 0, 80, accuracy: 0.001)
+        XCTAssertEqual(trims["2026-10-26"]?[41] ?? 0, 40, accuracy: 0.001)
+    }
+
     func testActivityLandsInItsQuarterHourNotAtMidnight() throws {
         var slot = ActivitySlots(active_kcal: Array(repeating: 0, count: 96),
                                  steps: Array(repeating: 0, count: 96),

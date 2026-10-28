@@ -18,7 +18,7 @@ enum ActivityModel {
         70937: "meditation", 71201: "eating", 71227: "relax", 71239: "transport",
     ]
 
-    private struct InferenceFailure: Error, CustomStringConvertible {
+    struct InferenceFailure: Error, CustomStringConvertible {
         let description: String
         init(_ message: String) { description = message }
         static func bridge() -> Self {
@@ -27,7 +27,7 @@ enum ActivityModel {
         }
     }
 
-    private struct TimedRow {
+    struct TimedRow {
         let unixMinute: Double
         let values: [Float]
     }
@@ -50,13 +50,17 @@ enum ActivityModel {
     /// changes, so cached results — cached failures above all — are recomputed once
     /// instead of being trusted for inputs the new pipeline would build differently.
     private static let pipelineVersion = 2
+    /// Keys the cache on both files: a newly bundled energy model recomputes calories.
+    private static var modelName: String? {
+        ModelFiles.find("automatic_activity_detection").map { "\($0.name)|\(ModelFiles.find("energy_expenditure")?.name ?? "-")" }
+    }
 
     /// The last complete pass's result when the store is unchanged since (same rows,
     /// same clock anchors) — no event read needed. `storeDigest` is `Events.digest()`.
     static func cachedRun(profile: Profile?, storeDigest: String?,
                           cacheFile: String = ModelCacheStore.activityFile) -> (sessions: [WorkoutSession], error: String?)? {
         guard let storeDigest else { return nil }
-        let globalKey = ModelCacheStore.globalKey(profile: profile)
+        let globalKey = ModelCacheStore.globalKey(profile: profile, model: modelName)
         guard ModelCacheStore.loadDigest(cacheFile, globalKey: globalKey) == "v\(pipelineVersion):\(storeDigest)"
         else { return nil }
         let cache: [String: ActivityDayEntry] = ModelCacheStore.load(cacheFile, globalKey: globalKey)
@@ -71,11 +75,11 @@ enum ActivityModel {
                     knownDigest: String? = nil,
                     progress: @escaping @Sendable (String) -> Void = { _ in },
                     inputsSink: (([String: Any]) -> Void)? = nil) -> (sessions: [WorkoutSession], error: String?) {
-        guard let aadPath = Bundle.main.path(forResource: "automatic_activity_detection_3_1_11", ofType: "ptl")
+        guard let aadPath = ModelFiles.find("automatic_activity_detection")?.path
         else { return ([], "activity model file missing from the app bundle") }
 
         guard !events.isEmpty else { return ([], onlyDay == nil ? nil : "No activity data is saved for this day.") }
-        let globalKey = ModelCacheStore.globalKey(profile: profile)
+        let globalKey = ModelCacheStore.globalKey(profile: profile, model: modelName)
         // Nothing changed since the last complete pass: the cached days are the
         // answer, without streaming the store. The caller may pass the digest it
         // already computed (one full-table scan per pass instead of one per model).
@@ -145,6 +149,17 @@ enum ActivityModel {
             calendar.startOfDay(for: Date(timeIntervalSince1970: $0.unixMinute * 60))
         }).sorted(by: >)
 
+        // energy_expenditure demographic: [sex (+1 M / -1 F), height_m, age, weight_kg, ring_size].
+        // Typed parts: the single literal timed out Xcode 16's type checker.
+        let energySex: Float = profile?.sex?.uppercased() == "F" ? -1 : 1
+        let energyHeight: Float = Float(profile?.height_m ?? 1.78)
+        let energyAge: Float = Float(profile?.age ?? 30)
+        let energyWeight: Float = Float(profile?.weight_kg ?? 75)
+        let energyRing: Float = Float(profile?.ring_size ?? 10)
+        let energyDemo: [Float] = [energySex, energyHeight, energyAge, energyWeight, energyRing]
+        let energy: (path: String, demo: [Float])? = ModelFiles.find("energy_expenditure").map { model in
+            (path: model.path, demo: energyDemo)
+        }
         let sex: Float = profile?.sex?.uppercased() == "M" ? 1 : 0
         let user: [Float] = [Float(profile?.age ?? 30), sex, Float(profile?.height_m ?? 1.78),
                              Float(profile?.weight_kg ?? 75)] + Array(repeating: nan, count: 10)
@@ -253,7 +268,7 @@ enum ActivityModel {
             if isDegenerate(day.inputs) {
                 dlog("models", "activity day=\(day.key) met=\(day.inputs.met.count) motion=\(day.inputs.motion.count) hr=\(day.inputs.hr.count): no valid wear window for the model, no sessions")
             } else {
-                do { daySessions = try runDay(day.inputs, user: user, aadPath: aadPath, nan: nan, inputsSink: inputsSink) }
+                do { daySessions = try runDay(day.inputs, user: user, aadPath: aadPath, nan: nan, energy: energy, inputsSink: inputsSink) }
                 catch {
                     guard !AnalysisRun.cancelled else {
                         if recomputed > 0 { ModelCacheStore.save(cacheFile, globalKey: globalKey, entries: cache, keepGenerations: true) }
@@ -333,6 +348,7 @@ enum ActivityModel {
 
     /// One AAD inference over one local day's inputs.
     private static func runDay(_ inputs: DayInputs, user: [Float], aadPath: String, nan: Float,
+                               energy: (path: String, demo: [Float])? = nil,
                                inputsSink: (([String: Any]) -> Void)? = nil) throws -> [WorkoutSession] {
         let decoded = try decodeStepPackets(inputs.rawStep)
         let lo = inputs.dayStart.timeIntervalSince1970 / 60
@@ -367,16 +383,89 @@ enum ActivityModel {
             let values = Array(output[row * 9..<row * 9 + 9])
             let start = inputs.dayStart.addingTimeInterval(Double(values[0]) * 60)
             let end = inputs.dayStart.addingTimeInterval(Double(values[1]) * 60)
-            sessions.append(WorkoutSession(
+            var session = WorkoutSession(
                 start: stamp.string(from: start), end: time.string(from: end),
                 durationMin: Int((values[1] - values[0]).rounded()),
                 label: behavior[Int(values[3])] ?? "activity", isWorkout: Double(values[2])
-            ))
+            )
+            if let energy, values[2] >= 0.5, values[1] - values[0] >= 10 {
+                session.kcal = workoutEnergy(inputs, steps: stepRows, activityId: values[3],
+                                             fromMinute: lo + Double(values[0]), toMinute: lo + Double(values[1]),
+                                             modelPath: energy.path, demo: energy.demo)
+            }
+            sessions.append(session)
         }
         return sessions
     }
 
-    private static func collectStepPackets(events: EventStore.Events, clock: EventStore.RingClock) -> [TimedRow] {
+    /// Oura's per-workout energy model over one detected workout, from the same day
+    /// inputs AAD read (twin of tools/run_energy_model.py). Returns active kcal, or nil.
+    private static func workoutEnergy(_ inputs: DayInputs, steps: [TimedRow], activityId: Float,
+                                      fromMinute: Double, toMinute: Double,
+                                      modelPath: String, demo: [Float]) -> Double? {
+        let lo = inputs.dayStart.timeIntervalSince1970 / 60
+        /// Rows of a day matrix (col 0 = minutes since local midnight) inside the workout,
+        /// as epoch-ms stamps and the remaining columns (NaN rows dropped).
+        func slice(_ flat: [Float], columns: Int, keep: Int) -> (ts: [Int64], values: [Float]) {
+            var ts: [Int64] = [], values: [Float] = []
+            for row in 0..<(flat.count / columns) {
+                let minute = lo + Double(flat[row * columns])
+                let rest = Array(flat[row * columns + 1..<row * columns + 1 + keep])
+                guard minute >= fromMinute, minute <= toMinute, !rest.contains(where: \.isNaN) else { continue }
+                ts.append(Int64((minute * 60_000).rounded())); values.append(contentsOf: rest)
+            }
+            return (ts, values)
+        }
+        var met = slice(inputs.met.flat, columns: 2, keep: 1)
+        // motion column 5 (regular_motion) is NaN in what the ring sends; EE reads it as 0.
+        var motion: (ts: [Int64], values: [Float]) = ([], [])
+        for row in 0..<inputs.motion.count {
+            let base = row * 9, minute = lo + Double(inputs.motion.flat[base])
+            var rest = Array(inputs.motion.flat[base + 1..<base + 9])
+            guard minute >= fromMinute, minute <= toMinute else { continue }
+            rest[5] = rest[5].isNaN ? 0 : rest[5]
+            guard !rest.contains(where: \.isNaN) else { continue }
+            motion.ts.append(Int64((minute * 60_000).rounded())); motion.values.append(contentsOf: rest)
+        }
+        var step: (ts: [Int64], values: [Float]) = ([], [])
+        for row in steps where row.unixMinute >= fromMinute && row.unixMinute <= toMinute
+            && !row.values.contains(where: \.isNaN) {
+            step.ts.append(Int64((row.unixMinute * 60_000).rounded())); step.values.append(contentsOf: row.values)
+        }
+        var hr = slice(inputs.hr.flat, columns: 2, keep: 1)
+        // EE's hr is [bpm, unused]; a plain loop keeps the type checker off flatMap's overloads.
+        var hrPairs: [Float] = []
+        hrPairs.reserveCapacity(hr.values.count * 2)
+        for bpm in hr.values {
+            hrPairs.append(bpm)
+            hrPairs.append(0)
+        }
+        var temp = slice(inputs.temp.flat, columns: 2, keep: 1)
+        var demoV = demo
+        var details: [Float] = [activityId, -1]
+        var out = [Double](repeating: .nan, count: 5)
+        // Typed arguments: the long inline-converted call timed out the type checker on Xcode 16.
+        let startMs: Int64 = Int64((fromMinute * 60_000).rounded())
+        let endMs: Int64 = Int64((toMinute * 60_000).rounded())
+        let nMet: Int32 = Int32(met.ts.count)
+        let nMotion: Int32 = Int32(motion.ts.count)
+        let nStep: Int32 = Int32(step.ts.count)
+        let nHr: Int32 = Int32(hr.ts.count)
+        let nTemp: Int32 = Int32(temp.ts.count)
+        let status: Int32 = oura_energy(modelPath, &demoV, &details, startMs, endMs,
+                                        &met.ts, &met.values, nMet,
+                                        &motion.ts, &motion.values, nMotion,
+                                        &step.ts, &step.values, nStep,
+                                        &hr.ts, &hrPairs, nHr,
+                                        &temp.ts, &temp.values, nTemp, &out)
+        guard status == 0, out[0].isFinite, out[0] >= 0 else {
+            dlog("models", "energy workout id=\(Int(activityId)) failed (status \(status))")
+            return nil
+        }
+        return (out[0] * 10).rounded() / 10
+    }
+
+    static func collectStepPackets(events: EventStore.Events, clock: EventStore.RingClock) -> [TimedRow] {
         var secondPackets: [Int64: Data] = [:]
         for event in events.restricted("tag=127") {
             guard let body = event.body, body.count == 14,
@@ -399,9 +488,9 @@ enum ActivityModel {
     /// Decode one day's (or a chunked slice of a day's) 27-col gait packets.
     /// Hiking days can be thousands of pairs; the old path fed the whole history
     /// as one tensor and jetsam-killed the app.
-    private static func decodeStepPackets(_ packets: [TimedRow]) throws -> [TimedRow] {
+    static func decodeStepPackets(_ packets: [TimedRow]) throws -> [TimedRow] {
         guard !packets.isEmpty else { return [] }
-        guard let modelPath = Bundle.main.path(forResource: "steps_motion_decoder_2_0_0", ofType: "ptl")
+        guard let modelPath = ModelFiles.find("steps_motion_decoder")?.path
         else { throw InferenceFailure("step decoder model file is missing from the app bundle") }
         let chunk = 4096
         let overlap = 24

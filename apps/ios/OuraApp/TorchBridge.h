@@ -48,6 +48,15 @@ int oura_stepmotion(const char *model_path, const int64_t *timestamps_ms,
                     const float *raw, int n_raw, int64_t *out_timestamps_ms,
                     float *out_features, int max_rows);
 
+// Count steps with Oura's step_counter. `step` is N×11 decoded gait rows in the
+// AAD column order (oura_stepmotion's output after ActivityModel's reorder), one per
+// 10 s window; `motion` is M×8 0x47 rows. Timestamps are Unix ms. Writes each row's
+// window start (ms) and step count; returns the row count, or -1 (see
+// oura_activity_last_error).
+int oura_step_counter(const char *model_path, const int64_t *step_ts, const float *step, int n_step,
+                      const int64_t *motion_ts, const float *motion, int n_motion,
+                      int64_t *out_start_ms, float *out_steps, int max_rows);
+
 // Illness detection ("Symptom Radar", illness_detection_0_5_1). Mirrors
 // tools/run_illness_model.py. `series` is row-major 7×30 (index 0 = today, NaN =
 // missing): average_breath, average_heart_rate, lowest_heart_rate, average_hrv,
@@ -60,6 +69,38 @@ int oura_stepmotion(const char *model_path, const int64_t *timestamps_ms,
 // out_biomarkers (16 floats). Returns 0 / -1.
 int oura_illness(const char *model_path, const float *series, const float *scalars,
                  double *out_score, int *out_decision, float *out_biomarkers);
+// Breathing disturbances (sleepnet_bdi_0_4_0), mirroring tools/run_bdi_model.py.
+// `ibi_val` is n×3 [ibi_ms, amplitude, validity] (ecore-corrected, as for NSSA) with
+// epoch-ms `ibi_ts`; the validator needs >= 60 beats. Writes the 6 output metrics
+// [bdi_status (2 = ODI >= 15), status (1 ok, 3 short sleep, 4 low coverage),
+// total_sleep_min, odi_all, odi_nrem, odi_rem] (ODI = % of sleep epochs flagged),
+// the epoch count and the flagged-sleep-epoch count. Returns 0 / -1.
+int oura_bdi(const char *model_path, int64_t bedtime_start_ms, int64_t bedtime_end_ms,
+             const int64_t *ibi_ts, const float *ibi_val, int n_ibi,
+             float *out_metrics, int *out_epochs, int *out_flagged_sleep);
+// Daytime stress (stress_daytime_sensing_1_1_0), one awake HRV sample, mirroring
+// tools/run_stress_model.py. Times are unix ms (sample and every bedtime window).
+// Writes out[8] = [intensity, stress_limit, recovery_limit, saturation_stress_deviation,
+// saturation_recovery_deviation, intensity_scaled, stress_limit_scaled,
+// recovery_limit_scaled]. Returns 0, the validator's rejection code (6 asleep,
+// 3 MET > 1.8, ...), or -1.
+int oura_stress(const char *model_path, float dhrv, double ts_ms,
+                const double *bed_start_ms, const double *bed_end_ms, int n_bed,
+                float dhrv_baseline, float night_baseline, float ring_met, float *out);
+// Workout energy (energy_expenditure_2_4_1), mirroring tools/run_energy_model.py.
+// demo[5] = [sex(+1 M / -1 F), height_m, age, weight_kg, ring_size]; details[2] =
+// [activity_id (AAD behavior id), intensity (-1 unknown)]; each stream is n rows of
+// epoch-ms `*_ts` with values met[1], motion[8], step[11] (decoded stepmotion), hr[2]
+// (bpm, unused), temp[1]; any stream may be empty. Writes out[5] = [active_kcal,
+// average_met, intensity 0-2, table_kcal, mode 1-4]. Returns 0 / -1.
+int oura_energy(const char *model_path, const float *demo, const float *details,
+                int64_t start_ms, int64_t end_ms,
+                const int64_t *met_ts, const float *met, int n_met,
+                const int64_t *motion_ts, const float *motion, int n_motion,
+                const int64_t *step_ts, const float *step, int n_step,
+                const int64_t *hr_ts, const float *hr, int n_hr,
+                const int64_t *temp_ts, const float *temp, int n_temp,
+                double *out);
 // Free every loaded model module (they reload on next use). Waits for a running
 // inference to finish, so call it off the main thread.
 void oura_torch_release(void);

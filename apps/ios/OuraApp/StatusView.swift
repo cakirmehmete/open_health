@@ -30,8 +30,8 @@ enum BackgroundLog {
     }
 }
 
-/// Home screen. Trends and charts live in the app reading Apple Health; this one
-/// only answers "is the ring → Health pipeline healthy?".
+/// Status tab: is the ring → Health pipeline healthy, and which Oura models ran.
+/// Model results are on the Today tab (InsightsView).
 struct StatusView: View {
     @ObservedObject var ring: RingSync
     @ObservedObject var health: HealthExport = .shared
@@ -39,12 +39,14 @@ struct StatusView: View {
     let onSyncNow: () -> Void
     let onOpenRing: () -> Void
     let onOpenProfile: () -> Void
+    let onOpenInsights: () -> Void
 
     var body: some View {
         // Relative times ("12 min ago") and the background log refresh on their own.
         TimelineView(.periodic(from: .now, by: 30)) { context in
             List {
                 ringSection(now: context.date)
+                insightsSection
                 syncSection(now: context.date)
                 healthSection(now: context.date)
                 backgroundSection(now: context.date)
@@ -82,6 +84,21 @@ struct StatusView: View {
                 Text("No ring paired. Open Ring, pairing & diagnostics to pair one.")
                     .font(.footnote).foregroundStyle(.red)
             }
+        }
+    }
+
+    // ── Models ──
+    // Results live on the Today tab; status keeps which models ran and what failed.
+    @ViewBuilder private var insightsSection: some View {
+        Section {
+            ForEach(summary?.modelErrors ?? [], id: \.self) { error in
+                Text(error).font(.caption).foregroundStyle(.orange)
+            }
+            NavigationLink("Models on this phone") { ModelListView() }
+            Button("Full sleep, activity & heart reports", action: onOpenInsights)
+                .disabled(summary == nil)
+        } header: {
+            Text("Oura models")
         }
     }
 
@@ -190,5 +207,38 @@ struct StatusView: View {
     private static func staleness(_ date: Date, now: Date) -> Color {
         let s = now.timeIntervalSince(date)
         return s < 2 * 3600 ? .green : (s < 6 * 3600 ? .orange : .red)
+    }
+}
+
+/// Which Oura model files this build bundles, and which version each family runs.
+struct ModelListView: View {
+    var body: some View {
+        List {
+            Section {
+                ForEach(ModelFiles.known, id: \.family) { model in
+                    let all = ModelFiles.bundled(model.family)
+                    let picked = ModelFiles.find(model.family)
+                    LabeledContent(model.title) {
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text(picked.map { "v" + ModelFiles.display($0.version) } ?? "not bundled")
+                                .foregroundStyle(picked == nil ? .secondary : .primary)
+                            if let picked, picked.version != model.validated {
+                                Text("tested on v\(ModelFiles.display(model.validated))")
+                                    .font(.caption2).foregroundStyle(.orange)
+                            }
+                            if picked == nil, let other = all.first {
+                                Text("v\(ModelFiles.display(other.version)) bundled, needs different inputs")
+                                    .font(.caption2).foregroundStyle(.orange)
+                            } else if all.count > 1 {
+                                Text("\(all.count) versions bundled").font(.caption2).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            } footer: {
+                Text("Oura's models are decrypted and exported on your Mac (tools/export_mobile.py) and bundled at build time. A missing model only hides its result.")
+            }
+        }
+        .navigationTitle("Models")
     }
 }

@@ -3,8 +3,9 @@
 input/output schema and top-level submodules, so we know each model's input
 contract before wiring it to our data.
 
-Usage: python tools/inspect_models.py [--json]
-Models live in notes/models/ (gitignored).
+Usage: python tools/inspect_models.py [--json] [--all-versions]
+Models live in notes/models/ (gitignored). The JSON holds only signatures (no
+weights), so it can be shared to wire a runner.
 """
 import json
 import sys
@@ -12,38 +13,13 @@ from pathlib import Path
 
 import torch
 
-REPO = Path(__file__).resolve().parent.parent
-MODELS_DIR = REPO / "notes" / "models"
+from _common import discover_models, resolve_models_dir
 
-# newest version per family (drop superseded duplicates)
-NEWEST = [
-    "automatic_activity_detection_3_1_11",
-    "atlas_2_1_0",
-    "awhr_imputation_1_2_0",
-    "awhr_profile_selector_1_0_1",
-    "cumulative_stress_1_2_2",
-    "cva_2_1_0",
-    "cva_calibrator_1_3_0",
-    "daily_medians_1_1_0",
-    "daily_short_term_baselines_1_1_0",
-    "dhrv_imputation_1_1_0",
-    "energy_expenditure_1_0_0",
-    "halite_1_2_0",
-    "illness_detection_0_5_1",
-    "insomnia_0_1_4",
-    "meal_timing_0_1_0",
-    "popsicle_1_6_0",
-    "pregnancy_biometrics_0_4_0",
-    "sleepnet_bdi_0_4_0",
-    "sleepnet_moonstone_1_2_0",
-    "sleepstaging_2_6_0",
-    "step_counter_1_3_0",
-    "steps_motion_decoder_2_0_0",
-    "stress_daytime_sensing_1_1_0",
-    "stress_resilience_2_2_1",
-    "training_stress_score_0_2_1",
-    "whr_2_7_1",
-]
+REPO = Path(__file__).resolve().parent.parent
+MODELS_DIR = resolve_models_dir(REPO)
+
+# Every decrypted model is discovered on its own (newest version per family by
+# default, `--all-versions` for every file), so a new APK's versions need no edit here.
 
 
 def describe(name):
@@ -90,7 +66,10 @@ def describe(name):
 
 def main():
     as_json = "--json" in sys.argv
-    results = [describe(n) for n in NEWEST]
+    names = discover_models(MODELS_DIR, newest_only="--all-versions" not in sys.argv)
+    if not names:
+        sys.exit(f"no models in {MODELS_DIR} (decrypt them there first)")
+    results = [describe(n) for n in names]
     if as_json:
         print(json.dumps(results, indent=2))
         return

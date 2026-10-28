@@ -807,6 +807,9 @@ struct RootView: View {
     @State private var showAllDays = false
     @State private var showSync = false
     @State private var showProfile = false
+    /// Home is the Today (model insights) and Status tabs; the full reports open in
+    /// place and stay open across launches until closed.
+    @AppStorage("home.reports") private var showReports = false
     @State private var showSleepDebt = false
     @State private var vital: VitalKind?
     @State private var loadGeneration = 0
@@ -840,12 +843,25 @@ struct RootView: View {
         return stamp.isEmpty ? "latest sync" : "latest · \(stamp)"
     }
     var body: some View {
-        // Data and trends are read from Apple Health by another app; home is status.
-        NavigationStack {
-            StatusView(ring: ring, summary: s,
-                       onSyncNow: syncNow,
-                       onOpenRing: { showSync = true },
-                       onOpenProfile: { showProfile = true })
+        Group {
+            if showReports, let s {
+                ZStack { Obs.canvas.ignoresSafeArea(); content(s) }
+            } else {
+                TabView {
+                    NavigationStack {
+                        InsightsView(summary: s, onOpenReports: { showReports = true })
+                    }
+                    .tabItem { Label("Today", systemImage: "sun.max") }
+                    NavigationStack {
+                        StatusView(ring: ring, summary: s,
+                                   onSyncNow: syncNow,
+                                   onOpenRing: { showSync = true },
+                                   onOpenProfile: { showProfile = true },
+                                   onOpenInsights: { showReports = true })
+                    }
+                    .tabItem { Label("Status", systemImage: "dot.radiowaves.left.and.right") }
+                }
+            }
         }
         .fullScreenCover(item: $report) { sel in if let s { DayReportView(s: s, day: sel.day, tab: sel.sleep ? .sleep : .activity) } }
         .sheet(isPresented: $showAllDays) { if let s { AllDaysView(s: s) } }
@@ -1053,6 +1069,11 @@ struct RootView: View {
                         Text("Open Oura").font(Obs.serif(22)).foregroundStyle(Obs.ink)
                         Text("beta").font(Obs.mono(9, .medium)).tracking(1.2).foregroundStyle(Obs.muted)
                         Spacer()
+                        Button { showReports = false } label: {
+                            Image(systemName: "gauge.with.dots.needle.33percent")
+                                .font(.system(size: 17)).foregroundStyle(Obs.ink2)
+                        }
+                        .accessibilityLabel("Status")
                         Button { showProfile = true } label: {
                             Image(systemName: "person.crop.circle")
                                 .font(.system(size: 17)).foregroundStyle(Obs.ink2)

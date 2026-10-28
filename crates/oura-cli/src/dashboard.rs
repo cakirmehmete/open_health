@@ -201,22 +201,30 @@ impl ModelRunner for PythonRunner {
         ];
         let illness_args = vec![db.display().to_string(), tz.to_string(), "--json".into()];
 
-        let (mut sleep_batch, cva, activity, illness) = match (root.as_deref(), py.as_deref()) {
+        let bdi_args = vec![db.display().to_string(), tz.to_string(), "--batch".into()];
+        let stress_args = vec![db.display().to_string(), tz.to_string(), "--json".into()];
+        let (mut sleep_batch, cva, activity, illness, breathing, stress) = match (root.as_deref(), py.as_deref()) {
             (Some(r), Some(p)) => std::thread::scope(|s| {
                 let sh = s.spawn(|| {
                     run_py_json_stdin(r, p, "tools/run_sleep_model.py", &sleep_args, &sleep_stdin)
                 });
+                let bh = s.spawn(|| {
+                    run_py_json_stdin(r, p, "tools/run_bdi_model.py", &bdi_args, &sleep_stdin)
+                });
                 let ch = s.spawn(|| run_py_json(r, p, "tools/run_cva_model.py", &cva_args));
                 let ah = s.spawn(|| run_py_json(r, p, "tools/run_activity_model.py", &act_args));
                 let ih = s.spawn(|| run_py_json(r, p, "tools/run_illness_model.py", &illness_args));
+                let th = s.spawn(|| run_py_json(r, p, "tools/run_stress_model.py", &stress_args));
                 (
                     sh.join().ok().flatten(),
                     ch.join().ok().flatten(),
                     ah.join().ok().flatten(),
                     ih.join().ok().flatten(),
+                    bh.join().ok().flatten(),
+                    th.join().ok().flatten(),
                 )
             }),
-            _ => (None, None, None, None),
+            _ => (None, None, None, None, None, None),
         };
         if sleep_batch_needs_fallback(sleep_batch.as_ref(), sleep_ranges.len())
             && !sleep_ranges.is_empty()
@@ -229,6 +237,8 @@ impl ModelRunner for PythonRunner {
             cva,
             activity,
             illness,
+            breathing,
+            stress,
         }
     }
 }

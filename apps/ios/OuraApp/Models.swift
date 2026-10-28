@@ -83,6 +83,8 @@ struct NightRow: Codable, Identifiable {
     /// Nightly respiratory rate (breaths/min), the ring's own per-window estimate.
     var breath_rate: Double? = nil
     var sleep_score: SleepScore? = nil
+    /// Oura's SleepNet-BDI result (web: `nights[].breathing`; iOS: BreathingModel).
+    var breathing: Breathing? = nil
     var id: String { (date ?? "") + (start ?? "") }
     var hasHypnogram: Bool { (hypnogram?.count ?? 0) > 1 }
     var isBedtimeManual: Bool { bedtime_manual ?? false }
@@ -170,9 +172,25 @@ struct Profile: Codable { var sex: String?; var age: Double?; var height_m: Doub
 // a detected activity session (on-device automatic_activity_detection)
 struct WorkoutSession: Identifiable, Codable {
     let start: String; let end: String; let durationMin: Int; let label: String; let isWorkout: Double
+    /// Active kcal from Oura's energy_expenditure model (on-device; nil without it).
+    var kcal: Double? = nil
     var id: String { start + label }
     var dayLabel: String { String(start.prefix(10)) }      // YYYY-MM-DD
     var startHM: String { String(start.suffix(5)) }        // HH:MM
+}
+/// Breathing disturbances for one night (tools/run_bdi_model.py's JSON shape).
+/// `odi_pct` is the share of sleep epochs flagged; status 1 = ok, 3 = under 3 h of
+/// sleep, 4 = beat coverage under 70 % (no verdict).
+struct Breathing: Codable {
+    var status: Int?
+    var elevated: Bool?
+    var total_sleep_min: Double?
+    var odi_pct: Double?
+    var odi_nrem_pct: Double?
+    var odi_rem_pct: Double?
+    var flagged_epochs: Int?
+    var events_per_hour: Double?
+    var model: String?
 }
 struct Cardio: Codable { var vascular_age: Double?; var chronological_age: Double?; var pwv_ms: Double?; var segments: Int? }
 struct Fitness: Codable { var vo2max: Double? }
@@ -228,6 +246,45 @@ struct IllnessResult: Codable {
     var date: String
     var daysWithData: Int
     var biomarkers: [IllnessBiomarker]
+}
+
+/// Daytime stress (stress_daytime_sensing_1_1_0): the web summary's `stress` block,
+/// computed on-device by StressModel. Same keys as tools/run_stress_model.py --json.
+struct StressSample: Codable, Identifiable {
+    var unix: Double
+    var minutes: Int
+    var dhrv: Double
+    var met: Double
+    var zone: String            // stressed | neutral | restored
+    var intensity: Double       // ms of awake HRV vs your awake baseline
+    var intensity_scaled: Double
+    var stress_limit: Double
+    var recovery_limit: Double
+    var stress_limit_scaled: Double?
+    var recovery_limit_scaled: Double?
+    var id: Double { unix }
+}
+struct StressDay: Codable, Identifiable {
+    var date: String
+    var stressed_min: Int
+    var restored_min: Int
+    var neutral_min: Int
+    var samples: Int
+    var night_hrv_baseline: Double
+    var dhrv_baseline: Double
+    var baseline_source: String
+    var mean_intensity_scaled: Double
+    var id: String { date }
+}
+struct DaytimeStress: Codable {
+    var model: String
+    var awake_hrv_samples: Int
+    var night_hrv_samples: Int
+    var met_imputed: Int
+    var neutral_zone_ms: Double?
+    var days: [StressDay]
+    var samples: [StressSample]
+    var rejected: [String: Int]
 }
 
 /// Per-boot ring clock diagnostics from the shared brain (`clock` in the summary JSON).
@@ -314,6 +371,7 @@ struct Summary: Codable {
     var fitness: Fitness?
     var sleepDebt: SleepDebtSummary?
     var illness: IllnessResult?           // on-device only (torch Symptom Radar; not in the JSON)
+    var stress: DaytimeStress?            // on-device only (torch daytime stress; not in the JSON)
     /// Model-free Symptom Radar from the shared core — same biomarkers, same shape,
     /// judged against your own baseline. Used when the torch model is not present.
     var symptoms: IllnessResult?

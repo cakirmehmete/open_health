@@ -242,7 +242,8 @@ final class HealthExport: ObservableObject {
             return false
         }
 
-        let wantedIDs = Set(samples.compactMap(Self.syncID) + workouts.map(\.syncID) + beatSeries.map(\.syncID))
+        let wantedIDs = Set(samples.compactMap(Self.syncID) + workouts.map(\.syncID) + workouts.compactMap(\.kcalSyncID)
+                            + beatSeries.map(\.syncID))
         let stale = ours.filter { sample in
             guard let id = Self.syncID(sample) else { return true }
             return !wantedIDs.contains(id)
@@ -323,7 +324,7 @@ final class HealthExport: ObservableObject {
         // Daytime HR comes from the event table, not the summary, so let an
         // otherwise unchanged summary still reconcile once per hour.
         parts.append("ids-v2:\(Int(Date().timeIntervalSince1970 / 3600)):\(s.fitness?.vo2max ?? 0)")
-        parts.append(contentsOf: s.workouts.filter { $0.isWorkout >= 0.5 }.map(\.id).sorted())
+        parts.append(contentsOf: s.workouts.filter { $0.isWorkout >= 0.5 }.map { "\($0.id):\($0.kcal ?? -1)" }.sorted())
         for n in s.nights {
             let st = n.hypnogram ?? []
             parts.append("n\(n.start_ds ?? 0):\(st.count):\(st.reduce(0, +)):\(n.hrv_ms ?? 0):\(n.rhr ?? 0):\(n.spo2_mean ?? 0):\(n.breath_rate ?? 0):\(n.series?.hr.count ?? 0)")
@@ -340,7 +341,8 @@ final class HealthExport: ObservableObject {
         let nights = Self.distinctNights(s.nights)
         for night in nights { out.append(contentsOf: sleepSamples(night)) }
         for night in nights { out.append(contentsOf: Self.heartSamples(night, canShare: canShare)) }
-        out.append(contentsOf: dailySamples(s.activity_daily, slots: s.activity_slots))
+        out.append(contentsOf: dailySamples(s.activity_daily, slots: s.activity_slots,
+                                            workoutMetKcal: Self.workoutMetKcal(s)))
         out.append(contentsOf: daytimeHeartSamples(nights: s.nights))
         out.append(contentsOf: fitnessSamples(s.fitness))
         return out
@@ -394,7 +396,44 @@ final class HealthExport: ObservableObject {
         let type: HKWorkoutActivityType
         let start: Date
         let end: Date
-        var syncID: String { HealthExport.syncPrefix + "workout.\(id)" }
+        /// Active kcal from Oura's energy model, attached to the workout.
+        let kcal: Double?
+        // A changed calorie figure replaces the workout instead of leaving the old one.
+        var syncID: String { HealthExport.syncPrefix + "workout.\(id)" + (kcal.map { ".\(Int($0.rounded()))kcal" } ?? "") }
+        /// The calorie sample saved inside the workout; reconciled with it.
+        var kcalSyncID: String? { kcal.map { HealthExport.syncPrefix + "workout-kcal.\(id).\(Int($0.rounded()))" } }
+    }
+
+    /// The MET estimate for each local day's model-scored workout minutes (the part
+    /// of that day's Active Energy the workouts now carry themselves), from the same
+    /// 15-min MET-above-rest profile as the daily figure: kcal = MET x kg x hours.
+    static func workoutMetKcal(_ s: Summary) -> [String: [Double]] {
+        let weight = s.profile?.weight_kg ?? 75
+        var out: [String: [Double]] = [:]
+        for w in s.workouts where w.isWorkout >= 0.5 && w.kcal != nil {
+            guard let (start, end) = workoutDates(w) else { continue }
+            var t = start
+            while t < end {
+                let day = Calendar.current.startOfDay(for: t)
+                let key = Self.ymd(day)
+                let bucket = Int(t.timeIntervalSince(day) / 900)
+                let bucketEnd = min(end, day.addingTimeInterval(Double(bucket + 1) * 900))
+                if let profile = s.activity_profile[key], bucket < profile.count, bucket < 96 {
+                    out[key, default: Array(repeating: 0, count: 96)][bucket] +=
+                        max(0, profile[bucket]) * weight * bucketEnd.timeIntervalSince(t) / 3600
+                }
+                t = bucketEnd
+            }
+        }
+        return out
+    }
+
+    private static func ymd(_ d: Date) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = .current
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: d)
     }
 
     private func plannedWorkouts(_ workouts: [WorkoutSession]) -> [PlannedWorkout] {
@@ -402,7 +441,7 @@ final class HealthExport: ObservableObject {
         var out: [PlannedWorkout] = []
         for w in workouts where w.isWorkout >= 0.5 {
             guard let (start, end) = Self.workoutDates(w) else { continue }
-            out.append(PlannedWorkout(id: w.id, type: Self.activityType(w.label), start: start, end: end))
+            out.append(PlannedWorkout(id: w.id, type: Self.activityType(w.label), start: start, end: end, kcal: w.kcal))
         }
         return out
     }
@@ -533,14 +572,28 @@ final class HealthExport: ObservableObject {
         group.enter()
         builder.beginCollection(withStart: plan.start) { success, error in
             guard success else { fail(error, fallback: "Could not start workout collection."); return }
-            builder.addMetadata(Self.meta("workout.\(plan.id)")) { success, error in
+            builder.addMetadata(Self.meta(String(plan.syncID.dropFirst(Self.syncPrefix.count)))) { success, error in
                 guard success else { fail(error, fallback: "Could not tag workout."); return }
-                builder.endCollection(withEnd: plan.end) { success, error in
-                    guard success else { fail(error, fallback: "Could not end workout collection."); return }
-                    builder.finishWorkout { _, error in
-                        result = error
-                        group.leave()
+                func end() {
+                    builder.endCollection(withEnd: plan.end) { success, error in
+                        guard success else { fail(error, fallback: "Could not end workout collection."); return }
+                        builder.finishWorkout { _, error in
+                            result = error
+                            group.leave()
+                        }
                     }
+                }
+                // The workout's calories ride on the workout (Bevel and Fitness read them
+                // there); the day's Active Energy sample leaves these minutes out.
+                guard let kcal = plan.kcal, kcal > 0, let kcalID = plan.kcalSyncID,
+                      let type = HKObjectType.quantityType(forIdentifier: .activeEnergyBurned),
+                      self.canShare(type) else { end(); return }
+                let sample = HKQuantitySample(type: type, quantity: HKQuantity(unit: .kilocalorie(), doubleValue: kcal),
+                                              start: plan.start, end: plan.end,
+                                              metadata: Self.meta(String(kcalID.dropFirst(Self.syncPrefix.count))))
+                builder.add([sample]) { success, error in
+                    guard success else { fail(error, fallback: "Could not add workout calories."); return }
+                    end()
                 }
             }
         }
@@ -685,15 +738,19 @@ final class HealthExport: ObservableObject {
         return out
     }
 
-    private func dailySamples(_ daily: [String: DailyStat], slots: [String: ActivitySlots]) -> [HKObject] {
-        Self.activitySamples(daily: daily, slots: slots, canShare: canShare)
+    private func dailySamples(_ daily: [String: DailyStat], slots: [String: ActivitySlots],
+                              workoutMetKcal: [String: [Double]] = [:]) -> [HKObject] {
+        Self.activitySamples(daily: daily, slots: slots, workoutMetKcal: workoutMetKcal, canShare: canShare)
     }
 
     /// Steps, active/basal energy and distance, placed in the 15-minute slots they
     /// happened in. Health readers chart samples at their start time, so a single
     /// midnight-to-midnight total showed the whole day at 12 am. Days without slot
     /// data (an older core) still get the daily total.
+    /// `workoutMetKcal` (per day, per slot) is the MET energy of model-scored workout
+    /// minutes; those workouts carry their own calories, so Active Energy leaves it out.
     static func activitySamples(daily: [String: DailyStat], slots: [String: ActivitySlots],
+                                workoutMetKcal: [String: [Double]] = [:],
                                 canShare: (HKSampleType) -> Bool, now: Date = Date()) -> [HKObject] {
         var out: [HKObject] = []
         let cal = Calendar.current
@@ -717,21 +774,25 @@ final class HealthExport: ObservableObject {
             guard let slot = slots[day], slot.steps.count == 96, slot.active_kcal.count == 96,
                   slot.minutes.count == 96 else {
                 add(steps, .count(), st.steps ?? 0, start, end, "steps.\(day).\(Int((st.steps ?? 0).rounded()))")
-                add(active, .kilocalorie(), st.active_kcal ?? 0, start, end, "kcal.\(day).\(Int((st.active_kcal ?? 0).rounded()))")
+                let trimmed = max(0, (st.active_kcal ?? 0) - (workoutMetKcal[day]?.reduce(0, +) ?? 0))
+                add(active, .kilocalorie(), trimmed, start, end, "kcal.\(day).\(Int(trimmed.rounded()))")
                 if let total = st.total_kcal, let act = st.active_kcal {
                     add(basal, .kilocalorie(), total - act, start, end, "basal.\(day).\(Int((total - act).rounded()))")
                 }
                 add(distance, .meter(), st.distance_m ?? 0, start, end, "dist.\(day).\(Int((st.distance_m ?? 0).rounded()))")
                 continue
             }
-            for i in 0..<96 where slot.minutes[i] > 0 {
+            // Counted steps can fall in a minute the MET stream missed; keep them.
+            for i in 0..<96 where slot.minutes[i] > 0 || (i < slot.steps.count && slot.steps[i] > 0) {
                 // DST days are 23 or 25 h long; slots follow the wall clock like the core.
                 guard let a = cal.date(byAdding: .minute, value: i * 15, to: start),
                       let b = cal.date(byAdding: .minute, value: (i + 1) * 15, to: start) else { continue }
                 // A slot still in progress ends now, not in the future.
                 let e = min(b, max(now, a.addingTimeInterval(1)))
                 let key = "\(day).\(i)"
-                let s = slot.steps[i], k = slot.active_kcal[i]
+                let trims = workoutMetKcal[day]
+                let s = slot.steps[i]
+                let k = max(0, slot.active_kcal[i] - (trims.map { i < $0.count ? $0[i] : 0 } ?? 0))
                 add(steps, .count(), s, a, e, "steps15.\(key).\(Int(s.rounded()))")
                 add(active, .kilocalorie(), k, a, e, "kcal15.\(key).\(Int((k * 10).rounded()))")
                 // ecore's walking distance, 0.762 m per step, as in the daily total.

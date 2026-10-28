@@ -48,10 +48,13 @@ metric there once and both clients receive it in the JSON.
 | **Heart rate across the day** (per-slot 5th–95th band + median tick; beats vs 5-min averages) | `openDayPage`→`heartSection`, `hrTimelineSvg` (`GET /api/hourly-hr?minutes=`; 15 min default, 1 h switch) | `HeartRate.swift` (`HourlyHR`, hourly) | `oura-summary::hourly_hr::{hr_bins, hourly_hr}` (not in the summary JSON) | — |
 | Stage breakdown | `stageBar` | `StageBreakdown` | `nights[].{deep,light,rem,wake}_pct` | SleepNet |
 | **Autonomic recovery by stage** (mean HR/HRV in deep/light/REM) | `sleepSection` autonomic grid | `SleepReport` `autonomicGrid` | `nights[].autonomic` | SleepNet (needs hypnogram) |
+| **Breathing disturbances** (ODI = % of sleep epochs flagged, events/h, NREM/REM split) | `sleepSection` "Breathing disturbances" grid | Today tab card → `BreathingDetail` (InsightsView.swift) | `nights[].breathing` | SleepNet-BDI (web: `run_bdi_model.py --batch` · iOS: `BreathingModel`) |
+| **Daytime stress** (stressed / neutral / restored minutes per day, per-reading chart, baselines) | `renderStress` "Daytime stress" panel | Today tab card → `StressDetail` (InsightsView.swift) | top-level `stress` | stress_daytime_sensing (web: `run_stress_model.py --json` · iOS: `StressModel`) |
 | **Cardiovascular age** | `renderCardio` | Cardio section | `cardio` | CVA (web: Python · iOS: `CvaModel`) |
 | **VO₂max estimate** | `renderCardio` | Fitness section | `fitness.vo2max` | — (Jackson, model-free) |
 | Movement ridge | `ridgeSvg` | `MovementRidge` | `activity_profile` | — (MET, model-free) |
 | **Activity sessions / workouts** | `openActDetail` (session) | workouts section | `activity` | AAD (web: Python · iOS: `ActivityModel`) |
+| **Workout calories** (Oura's per-workout energy model; MET estimate stays as `active_kcal`) | `openActDetail` "Calories (Oura model)" | Today tab workouts card | `activity[].kcal` (iOS `WorkoutSession.kcal`) | energy_expenditure_2_4_1 (web: `run_activity_model.py` · iOS: `ActivityModel.workoutEnergy`) |
 | Steps / active calories / **distance** | activity report stats | activity day stats | `activity_daily` (incl. `distance_m`) | — |
 | Previous days browser | `openDaysBrowser` → `openDayPage` | `AllDaysView` → `DayDetailView` | day keys | — |
 | Device & data health | `renderDevice` | device section | `device`, `streams` | — |
@@ -78,6 +81,18 @@ a nap doesn't shadow the real sleep.
   results and analyzes only the latest night when its result is missing. A changed
   bedtime window counts as missing. Older missing nights require “Refresh analysis”
   in their Sleep tab. Automatic runs do not prune the historical model cache.
+- **iOS home = Today + Status tabs**: Today (`InsightsView.swift`) shows each model's and
+  vital's latest result in the look of Oura's app: score rings, dark cards with a range
+  slider against your personal range (10th–90th percentile of recent nights), banded
+  trend charts and a contributors list (Symptom Radar biomarkers, vital consistency). It
+  opens the full reports (`RootView.content`, the old home) in place. Status
+  (`StatusView.swift`) is the ring → Health pipeline plus "Models on this phone"
+  (`ModelListView`). The web home already shows the same results in its own layout; the
+  range sliders and contributor bars are iOS-only for now.
+- **Model versions (both)**: a client looks a model up by family, not exact file name.
+  It prefers the version its inputs were validated on and otherwise runs the newest one
+  present (iOS `ModelFiles.find`, Python `_common.resolve_model`). iOS caches key on the
+  bundled model name, so a new version recomputes. Add a family to both when wiring one.
 - **iOS compact disclosures**: symptom radar initially shows its status and explanation;
   “View details” reveals measurements and personal ranges together. Ring troubleshooting
   is a "Help & diagnostics" card of grouped rows (check data, share report, export raw
@@ -275,6 +290,17 @@ has no `illness`) and the ring-clock warnings (`clock.warnings`). Still iOS-only
   ring's `oura.db`**. **Deliberately web-only** — like the DNA explorer it has nothing to do
   with ring data, does not go through `oura-summary`, and is not mirrored on iOS. When
   extraction is built, `blood.rs`'s marker model is the reusable brain.
+
+- **Workout calories in Apple Health (iOS)**: a workout with the energy model's kcal
+  carries it as an Active Energy sample inside the workout, and that day's Active
+  Energy sample drops the MET estimate for those minutes (`HealthExport.workoutMetKcal`,
+  from `activity_profile`), so the day total is not counted twice.
+- **Breathing disturbances in Apple Health**: not written. HealthKit's sleeping
+  breathing-disturbances type is Apple's own Watch metric, and the BDI output is a
+  share of flagged epochs rather than Apple's per-hour count. Shown in both apps only.
+
+- **Daytime stress in Apple Health**: not written. HealthKit has no stress type
+  (State of Mind is a self-report). Shown in both apps only.
 
 When you close one of these gaps, update this section.
 

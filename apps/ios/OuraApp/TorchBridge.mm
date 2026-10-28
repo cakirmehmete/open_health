@@ -30,11 +30,11 @@ struct ModuleSlot {
     std::unique_ptr<torch::jit::mobile::Module> module;
     std::string path;
 };
-static ModuleSlot g_sleepnet, g_cva, g_activity, g_stepmotion, g_illness;
+static ModuleSlot g_sleepnet, g_cva, g_activity, g_stepmotion, g_stepcounter, g_illness, g_bdi, g_energy, g_stress;
 
 void oura_torch_release(void) {
     std::lock_guard<std::mutex> lock(g_torch);
-    for (ModuleSlot *slot : {&g_sleepnet, &g_cva, &g_activity, &g_stepmotion, &g_illness}) {
+    for (ModuleSlot *slot : {&g_sleepnet, &g_cva, &g_activity, &g_stepmotion, &g_stepcounter, &g_illness, &g_bdi, &g_energy, &g_stress}) {
         slot->module.reset();
         slot->path.clear();
     }
@@ -215,6 +215,116 @@ int oura_cva(const char *model_path, const float *ppg, int n_segs, const float *
     }
 }
 
+int oura_bdi(const char *model_path, int64_t bedtime_start_ms, int64_t bedtime_end_ms,
+             const int64_t *ibi_ts, const float *ibi_val, int n_ibi,
+             float *out_metrics, int *out_epochs, int *out_flagged_sleep) {
+    if (!model_path || !ibi_ts || !ibi_val || !out_metrics || !out_epochs || !out_flagged_sleep || n_ibi < 60)
+        return -1;
+    std::lock_guard<std::mutex> lock(g_torch);
+    try {
+        auto &m = cachedModule(model_path, g_bdi.module, g_bdi.path);
+        int64_t bed[2] = {bedtime_start_ms, bedtime_end_ms};
+        auto bed_t = at::from_blob(bed, {2}, at::kLong).clone();
+        auto out = m.forward({bed_t, blobFloat2d(ibi_val, n_ibi, 3), blobLong(ibi_ts, n_ibi)}).toTuple();
+        // (timestamps, sleepStages[N,5], apneaEvents[N,2], outputMetrics[6,1], debug[10])
+        auto stages = out->elements()[1].toTensor();
+        auto apnea = out->elements()[2].toTensor();
+        auto metrics = out->elements()[3].toTensor().reshape({-1}).to(at::kFloat).contiguous();
+        if (metrics.numel() < 6) return -1;
+        for (int i = 0; i < 6; ++i) out_metrics[i] = metrics[i].item<float>();
+        int64_t n = stages.size(0);
+        *out_epochs = (int)n;
+        int flagged = 0;
+        if (n > 0 && apnea.size(0) == n) {
+            // col0 of sleepStages is the stage code: 1 deep, 2 light, 3 REM, 4 awake.
+            auto code = stages.select(1, 0);
+            auto flag = apnea.select(1, 0);
+            for (int64_t i = 0; i < n; ++i) {
+                double c = code[i].item<double>();
+                if (c >= 1 && c <= 3 && flag[i].item<double>() >= 0.5) ++flagged;
+            }
+        }
+        *out_flagged_sleep = flagged;
+        return 0;
+    } catch (const std::exception &e) {
+        NSLog(@"oura_bdi: %s", e.what());
+        return -1;
+    }
+}
+
+int oura_stress(const char *model_path, float dhrv, double ts_ms,
+                const double *bed_start_ms, const double *bed_end_ms, int n_bed,
+                float dhrv_baseline, float night_baseline, float ring_met, float *out) {
+    if (!model_path || !out || n_bed < 0 || (n_bed > 0 && (!bed_start_ms || !bed_end_ms))) return -1;
+    std::lock_guard<std::mutex> lock(g_torch);
+    try {
+        auto &m = cachedModule(model_path, g_stress.module, g_stress.path);
+        auto f = [](float v) { return at::full({1}, v, at::kFloat); };
+        auto d = [](const double *p, int64_t n) {
+            return n > 0 ? at::from_blob((void *)p, {n}, at::kDouble).clone() : at::empty({0}, at::kDouble);
+        };
+        auto res = m.forward({f(dhrv), at::full({1}, ts_ms, at::kDouble), d(bed_start_ms, n_bed),
+                              d(bed_end_ms, n_bed), f(dhrv_baseline), f(night_baseline), f(ring_met)});
+        auto &el = res.toTuple()->elements();
+        if (el.size() < 8) return -1;
+        for (int i = 0; i < 8; ++i) out[i] = el[i].toTensor().reshape({-1})[0].item<float>();
+        return 0;
+    } catch (const std::exception &e) {
+        // The validator raises "<code>, <message>"; hand the code back (6 asleep,
+        // 3 too active, ...) so the caller can count rejections like the runner does.
+        std::string msg = e.what();
+        size_t nl = msg.find_last_not_of(" \n");
+        size_t start = nl == std::string::npos ? 0 : msg.find_last_of('\n', nl);
+        start = start == std::string::npos ? 0 : start + 1;
+        size_t digit = msg.find_first_of("0123456789", start);
+        int code = digit == std::string::npos ? 0 : std::atoi(msg.c_str() + digit);
+        if (code > 0 && code < 100) return code;
+        NSLog(@"oura_stress: %s", e.what());
+        return -1;
+    }
+}
+
+static at::Tensor stamps(const int64_t *p, int64_t n) {
+    if (n <= 0) return at::empty({0, 1}, at::kLong);
+    return at::from_blob((void *)p, {n, 1}, at::kLong).clone();
+}
+
+int oura_energy(const char *model_path, const float *demo, const float *details,
+                int64_t start_ms, int64_t end_ms,
+                const int64_t *met_ts, const float *met, int n_met,
+                const int64_t *motion_ts, const float *motion, int n_motion,
+                const int64_t *step_ts, const float *step, int n_step,
+                const int64_t *hr_ts, const float *hr, int n_hr,
+                const int64_t *temp_ts, const float *temp, int n_temp,
+                double *out) {
+    if (!model_path || !demo || !details || !out || end_ms <= start_ms) return -1;
+    std::lock_guard<std::mutex> lock(g_torch);
+    try {
+        auto &m = cachedModule(model_path, g_energy.module, g_energy.path);
+        int64_t window[2] = {start_ms, end_ms};
+        auto trends = at::full({15}, NAN, at::kFloat);  // model defaults for every trend
+        std::vector<c10::IValue> inputs{
+            at::from_blob((void *)demo, {5}, at::kFloat).clone(),
+            at::from_blob((void *)details, {2}, at::kFloat).clone(),
+            at::from_blob(window, {2}, at::kLong).clone(),
+            blobFloat2d(met, n_met, 1), stamps(met_ts, n_met),
+            blobFloat2d(motion, n_motion, 8), stamps(motion_ts, n_motion),
+            blobFloat2d(step, n_step, 11), stamps(step_ts, n_step),
+            blobFloat2d(hr, n_hr, 2), stamps(hr_ts, n_hr),
+            blobFloat2d(temp, n_temp, 1), stamps(temp_ts, n_temp),
+            trends,
+            at::empty({0, 5}, at::kFloat), at::empty({0, 1}, at::kLong),  // location: unused
+        };
+        auto res = m.forward(inputs).toTuple();
+        // (active_kcal, average_met, intensity, table_kcal, mode, met_rescaled, effort, effort_src)
+        for (int i = 0; i < 5; ++i) out[i] = res->elements()[i].toTensor().reshape({-1})[0].item<double>();
+        return 0;
+    } catch (const std::exception &e) {
+        NSLog(@"oura_energy: %s", e.what());
+        return -1;
+    }
+}
+
 static at::Tensor mat(const float *p, int rows, int cols) {
     return rows > 0 ? blobFloat2d(p, rows, cols) : at::empty({0, cols}, at::kFloat);
 }
@@ -305,6 +415,44 @@ int oura_stepmotion(const char *model_path, const int64_t *timestamps_ms,
         return n;
     } catch (const std::exception &e) {
         return activityFailure(std::string("step decoder: ") + e.what());
+    }
+}
+
+int oura_step_counter(const char *model_path, const int64_t *step_ts, const float *step, int n_step,
+                      const int64_t *motion_ts, const float *motion, int n_motion,
+                      int64_t *out_start_ms, float *out_steps, int max_rows) {
+    activity_error.clear();
+    if (!model_path || !step_ts || !step || !out_start_ms || !out_steps)
+        return activityFailure("step counter: invalid model inputs or output buffer");
+    if (n_step <= 0 || max_rows <= 0) return 0;
+    std::lock_guard<std::mutex> lock(g_torch);
+    try {
+        auto &m = cachedModule(model_path, g_stepcounter.module, g_stepcounter.path);
+        auto ts = blobLong(step_ts, n_step);
+        auto data = blobFloat2d(step, n_step, 11);
+        // No motion is valid input (the model fills its defaults), but keep the shapes.
+        auto mts = n_motion > 0 ? blobLong(motion_ts, n_motion) : at::zeros({0}, at::kLong);
+        auto mdata = n_motion > 0 ? blobFloat2d(motion, n_motion, 8) : at::zeros({0, 8}, at::kFloat);
+        // NaN interval: one output row per input window, no re-binning.
+        auto interval = at::full({}, std::numeric_limits<float>::quiet_NaN(), at::kFloat);
+        auto result = m.forward({ts, data, mts, mdata, interval}).toTuple();
+        auto out_ts = result->elements()[0].toTensor().to(at::kLong).contiguous();
+        auto out_data = result->elements()[1].toTensor().to(at::kFloat).reshape({-1}).contiguous();
+        if (out_data.numel() == 0) return 0;
+        if (out_ts.dim() != 2 || out_ts.size(0) != out_data.numel()) {
+            return activityFailure("step counter: unexpected output shape, rank " + std::to_string(out_ts.dim()));
+        }
+        int n = std::min<int>((int)out_data.numel(), max_rows);
+        const int64_t *tp = out_ts.data_ptr<int64_t>();
+        const float *fp = out_data.data_ptr<float>();
+        const int64_t cols = out_ts.size(1);
+        for (int i = 0; i < n; i++) {
+            out_start_ms[i] = tp[i * cols];
+            out_steps[i] = fp[i];
+        }
+        return n;
+    } catch (const std::exception &e) {
+        return activityFailure(std::string("step counter: ") + e.what());
     }
 }
 

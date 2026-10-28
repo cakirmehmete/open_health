@@ -96,6 +96,9 @@ targets:
       - path: CvaModel.swift
       - path: ActivityModel.swift
       - path: IllnessModel.swift
+      - path: BreathingModel.swift
+      - path: StressModel.swift
+      - path: StepCounter.swift
       - path: TorchBridge.mm
       - path: TorchBridge.h
       - path: CrashCatch.c
@@ -105,22 +108,28 @@ targets:
       - path: BackgroundSync.swift
       - path: RingWatcher.swift
       - path: StatusView.swift
+      - path: ModelFiles.swift
+      - path: InsightsView.swift
       - path: ../generated/oura_core.swift
       - path: Assets.xcassets
       # bundled models + data (gitignored local files). oura.db is temporary until the
       # on-device BLE sync lands — then the app builds its own DB from your ring.
       # NSSA sleep stager + its tree-ensemble classifier (tools/extract_nssa_classifier.py)
-      - path: ../../../notes/models/mobile/sleepstaging_2_6_0.ptl
-        buildPhase: resources
-      - path: ../../../notes/models/mobile/sleepstaging_2_6_0_classifier.bin
-        buildPhase: resources
-      - path: ../../../notes/models/mobile/cva_2_1_0.ptl
-        buildPhase: resources
-      - path: ../../../notes/models/mobile/automatic_activity_detection_3_1_11.ptl
-        buildPhase: resources
-      - path: ../../../notes/models/mobile/steps_motion_decoder_2_0_0.ptl
-        buildPhase: resources
-      - path: ../../../notes/models/mobile/illness_detection_0_5_1.ptl
+      # Models exported to notes/models/mobile (gitignored; Oura's files stay local).
+      # Only the families the app runs (ModelFiles.known); it picks each family's
+      # version at run time and skips a family with no file (tools/export_mobile.py).
+      - path: ../../../notes/models/mobile
+        type: group
+        includes:
+          - "sleepstaging_*"
+          - "automatic_activity_detection_*.ptl"
+          - "steps_motion_decoder_*.ptl"
+          - "cva_[0-9]*.ptl"
+          - "illness_detection_*.ptl"
+          - "sleepnet_bdi_*.ptl"
+          - "stress_daytime_sensing_*.ptl"
+          - "step_counter_*.ptl"
+          - "energy_expenditure_*.ptl"
         buildPhase: resources
       - path: ../../../oura.db
         buildPhase: resources
