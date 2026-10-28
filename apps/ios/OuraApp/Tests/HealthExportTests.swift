@@ -157,4 +157,31 @@ final class HealthExportTests: XCTestCase {
         let legacy = HealthExport.activitySamples(daily: daily, slots: [:], canShare: { _ in true })
         XCTAssertEqual(legacy.count, 4)
     }
+
+    func testReconcileKeepsHistoryOutsideTheWindowedBuilders() {
+        // Daytime HR, beat series and VO2 max are built from a recent window only;
+        // anything older is history the export didn't reload, not a stale sample.
+        let today = Date(timeIntervalSince1970: 1_790_000_000)
+        let coverage = HealthExport.Coverage(hourlyFrom: today.addingTimeInterval(-3 * 86400),
+                                             beatsFrom: today.addingTimeInterval(-4 * 86400), today: today)
+        let t = Int(today.timeIntervalSince1970)
+        func stale(_ id: String?, _ c: HealthExport.Coverage = coverage) -> Bool {
+            HealthExport.isStale(id, wanted: ["openoura.hrh.\(t).60"], coverage: c)
+        }
+        XCTAssertFalse(stale("openoura.hrh.\(t).60"))
+        XCTAssertTrue(stale("openoura.hrh.\(t).58"), "a revised median inside the window replaces the old one")
+        XCTAssertFalse(stale("openoura.hrh.\(t - 5 * 86400).70"))
+        XCTAssertTrue(stale("openoura.beats.\((t - 86400) * 1000).300"))
+        XCTAssertFalse(stale("openoura.beats.\((t - 10 * 86400) * 1000).300"))
+        XCTAssertTrue(stale("openoura.vo2.\(t).421"), "today's estimate is rebuilt each run")
+        XCTAssertFalse(stale("openoura.vo2.\(t - 86400).418"), "earlier days build the VO2 trend")
+        // Builders that load nothing (no permission, unreadable store) cover nothing.
+        let none = HealthExport.Coverage(hourlyFrom: nil, beatsFrom: nil, today: today)
+        XCTAssertFalse(stale("openoura.hrh.\(t).58", none))
+        XCTAssertFalse(stale("openoura.beats.\(t * 1000).300", none))
+        // Everything else is rebuilt in full each run, so missing means gone.
+        XCTAssertTrue(stale("openoura.rhr.100.50"))
+        XCTAssertTrue(stale("openoura.hrv.rmssd.100.72"))
+        XCTAssertTrue(stale(nil))
+    }
 }

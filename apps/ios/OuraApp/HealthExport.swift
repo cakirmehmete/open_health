@@ -37,6 +37,8 @@ final class HealthExport: ObservableObject {
     private let store = HKHealthStore()
     private let queue = DispatchQueue(label: "md.thomas.openoura.health", qos: .utility)
     private var pushing = false
+    private var wakeHandler: ((@escaping () -> Void) -> Void)?
+    private var observingWakeUps = false
 
     private init() {
         enabled = UserDefaults.standard.bool(forKey: Self.enabledKey)
@@ -95,6 +97,7 @@ final class HealthExport: ObservableObject {
                 DispatchQueue.main.async { self.status = "Apple Health write access was not granted." }
                 return
             }
+            DispatchQueue.main.async { self.startWakeObserver() }
             if let summary { self.push(summary, force: true) }
             else if let cached = SummaryCache.load() { self.push(cached, force: true) }
             else { DispatchQueue.main.async { self.status = "On. Data will export after the next analysis." } }
@@ -122,7 +125,14 @@ final class HealthExport: ObservableObject {
         if fp == UserDefaults.standard.string(forKey: Self.fingerprintKey) { return true }
         return await withCheckedContinuation { completion in
             queue.async { [weak self] in
-                guard let self, !self.pushing else { completion.resume(returning: false); return }
+                guard let self else { completion.resume(returning: false); return }
+                guard !self.pushing else {
+                    // The running push may hold an older summary; owe this one to the
+                    // unlock flush rather than to the next hourly fingerprint change.
+                    UserDefaults.standard.set(true, forKey: Self.pendingKey)
+                    completion.resume(returning: false)
+                    return
+                }
                 self.pushing = true
                 defer { self.pushing = false }
                 completion.resume(returning: self.authorizeAndWrite(summary, fingerprint: fp))
@@ -137,10 +147,17 @@ final class HealthExport: ObservableObject {
         HKObjectType.quantityType(forIdentifier: .stepCount).map { [$0] } ?? []
     }
 
-    /// Must be registered at every launch, background ones included.
+    /// Must be registered at every launch, background ones included. With export
+    /// off at launch the handler is kept and registered when the switch turns on.
     func observeForWakeUps(_ onUpdate: @escaping (@escaping () -> Void) -> Void) {
-        guard enabled, HKHealthStore.isHealthDataAvailable(),
+        wakeHandler = onUpdate
+        startWakeObserver()
+    }
+
+    private func startWakeObserver() {
+        guard enabled, !observingWakeUps, let onUpdate = wakeHandler, HKHealthStore.isHealthDataAvailable(),
               let steps = HKObjectType.quantityType(forIdentifier: .stepCount) else { return }
+        observingWakeUps = true
         let query = HKObserverQuery(sampleType: steps, predicate: nil) { _, completion, error in
             if let error { dlog("health", "step observer: \(error)"); completion(); return }
             onUpdate(completion)
@@ -211,7 +228,8 @@ final class HealthExport: ObservableObject {
 
         let samples = buildSamples(summary)
         let workouts = plannedWorkouts(summary.workouts)
-        let beatSeries = plannedHeartbeats(Self.distinctNights(summary.nights))
+        let (beatSeries, beatsFrom) = plannedHeartbeats(Self.distinctNights(summary.nights))
+        let hourlyFrom = lastHourlyCoverage
         dlog("health", "export \(samples.count) samples, \(workouts.count) workouts, \(beatSeries.count) beat series")
         let types = Self.reconciliationTypes(canShare: canShare)
         let collect = DispatchGroup()
@@ -243,10 +261,9 @@ final class HealthExport: ObservableObject {
         }
 
         let wantedIDs = Set(samples.compactMap(Self.syncID) + workouts.map(\.syncID) + beatSeries.map(\.syncID))
-        let stale = ours.filter { sample in
-            guard let id = Self.syncID(sample) else { return true }
-            return !wantedIDs.contains(id)
-        }
+        let coverage = Coverage(hourlyFrom: hourlyFrom, beatsFrom: beatsFrom,
+                                today: Calendar.current.startOfDay(for: Date()))
+        let stale = ours.filter { Self.isStale(Self.syncID($0), wanted: wantedIDs, coverage: coverage) }
         let existingIDs = Set(ours.compactMap(Self.syncID))
         let freshSamples = samples.filter {
             guard let id = Self.syncID($0) else { return true }
@@ -316,6 +333,39 @@ final class HealthExport: ObservableObject {
         store.execute(query)
     }
 
+    /// How far back the windowed builders looked in this run. Daytime HR, beat
+    /// series and VO2 max are built from a recent window only, so an ID missing from
+    /// the plan is stale only if it falls inside that window; older ones are history
+    /// the builder simply didn't load, and stay in Health.
+    struct Coverage {
+        /// Start of the oldest hour `daytimeHeartSamples` loaded; nil when none loaded.
+        var hourlyFrom: Date?
+        /// Oldest beat start `plannedHeartbeats` could have produced; nil when none.
+        var beatsFrom: Date?
+        /// VO2 max is one sample per day, and only today's is rebuilt.
+        var today: Date
+    }
+
+    static func isStale(_ id: String?, wanted: Set<String>, coverage: Coverage) -> Bool {
+        guard let id else { return true }
+        if wanted.contains(id) { return false }
+        guard id.hasPrefix(syncPrefix) else { return true }
+        let parts = id.dropFirst(syncPrefix.count).split(separator: ".")
+        guard let kind = parts.first, parts.count >= 2, let stamp = Double(parts[1]) else { return true }
+        switch kind {
+        case "hrh":
+            guard let from = coverage.hourlyFrom else { return false }
+            return stamp >= from.timeIntervalSince1970
+        case "beats":
+            guard let from = coverage.beatsFrom else { return false }
+            return stamp / 1000 >= from.timeIntervalSince1970
+        case "vo2":
+            return stamp >= coverage.today.timeIntervalSince1970
+        default:
+            return true
+        }
+    }
+
     static func fingerprint(_ s: Summary) -> String {
         // Force one reconciliation after upgrading from the mislabeled SDNN
         // writer, and another when the OS first supports the proper RMSSD type.
@@ -350,9 +400,11 @@ final class HealthExport: ObservableObject {
     /// median (outlier beats would otherwise read as peaks). Night hours are left to
     /// `heartSamples`, which writes the sleep series at a finer step.
     private func daytimeHeartSamples(nights: [NightRow]) -> [HKObject] {
+        lastHourlyCoverage = nil
         guard let type = HKObjectType.quantityType(forIdentifier: .heartRate), canShare(type) else { return [] }
         let hourly = HourlyHR.load(days: 3)
         if let error = hourly.error { dlog("health", "hourly HR unavailable: \(error)"); return [] }
+        lastHourlyCoverage = hourly.bars.map(\.unix).min().map { Date(timeIntervalSince1970: $0) }
         let asleep = nights.compactMap(Self.nightInterval)
         let unit = HKUnit.count().unitDivided(by: .minute())
         return hourly.bars.compactMap { bar -> HKObject? in
@@ -365,6 +417,9 @@ final class HealthExport: ObservableObject {
                                     metadata: Self.meta("hrh.\(Int(bar.unix)).\(Int(bar.median.rounded()))"))
         }
     }
+
+    /// Set by `daytimeHeartSamples`; only touched on `queue`.
+    private var lastHourlyCoverage: Date?
 
     /// The ring-derived VO2 max estimate, stamped on the day it was computed.
     private func fitnessSamples(_ fitness: Fitness?) -> [HKObject] {
@@ -440,16 +495,17 @@ final class HealthExport: ObservableObject {
         return kept
     }
 
-    private func plannedHeartbeats(_ nights: [NightRow]) -> [PlannedHeartbeats] {
-        guard canShare(HKSeriesType.heartbeat()) else { return [] }
-        let windows = nights.compactMap(Self.nightInterval)
-            .filter { Date().timeIntervalSince($0.1) < 4 * 86400 }
-        guard !windows.isEmpty else { return [] }
+    /// Also returns the oldest time the plan covers (see `Coverage.beatsFrom`).
+    private func plannedHeartbeats(_ nights: [NightRow]) -> ([PlannedHeartbeats], Date?) {
+        guard canShare(HKSeriesType.heartbeat()) else { return ([], nil) }
+        let cutoff = Date().addingTimeInterval(-4 * 86400)
+        let windows = nights.compactMap(Self.nightInterval).filter { $0.1 > cutoff }
+        guard !windows.isEmpty else { return ([], nil) }
         // The newest IBI events (6 beats each); a night is a few thousand of them.
         let json = eventsJson(dbPath: DB.readPath(), nameFilter: "ibi_and_amplitude_event", limit: 25_000)
         guard let data = json.data(using: .utf8),
               let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let rows = root["events"] as? [[String: Any]] else { return [] }
+              let rows = root["events"] as? [[String: Any]] else { return ([], nil) }
         var events: [(Int64, [Int], [Int])] = rows.compactMap { row in
             guard let unix = (row["unix_s"] as? NSNumber)?.doubleValue,
                   let decoded = row["decoded"] as? [String: Any],
@@ -457,7 +513,11 @@ final class HealthExport: ObservableObject {
             return (Int64(unix * 1000), ibis, (decoded["amplitude"] as? [NSNumber])?.map(\.intValue) ?? [])
         }
         events.sort { $0.0 < $1.0 }
-        return Self.heartbeatSeries(events: events, windows: windows)
+        // A night that started before the cutoff, or before the oldest event the
+        // limit let through, was only partly planned; leave its older series alone.
+        guard let oldest = events.first else { return ([], nil) }
+        let from = max(cutoff, Date(timeIntervalSince1970: Double(oldest.0) / 1000))
+        return (Self.heartbeatSeries(events: events, windows: windows), from)
     }
 
     /// Pure: expand IBI events to beats, keep the ones Oura's own correction calls
