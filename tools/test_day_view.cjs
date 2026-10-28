@@ -40,7 +40,7 @@ assert(lanes.some(t => t.includes('Stages · 5 min (Oura app)')), '5-minute Oura
 assert(lanes.some(t => t.includes('Stages') && !t.includes('5 min')), '30 s stage lane missing');
 const absent = { ...data, nights: [{ ...night, start_ds: 10000, end_ds: 298000, stages_full: [] }] };
 w.openDayPage(absent, '2026-09-26');
-assert(w.document.querySelector('#sec-sleep').textContent.includes('stages are unavailable'));
+assert(w.document.querySelector('#sec-sleep').textContent.includes("didn't stage this night"));
 assert(!w.document.querySelector('#sec-sleep').textContent.includes('Incomplete sleep analysis'));
 const editBtn = w.document.querySelector('.bedtime-edit-btn');
 const editorForm = w.document.querySelector('.bedtime-editor');
