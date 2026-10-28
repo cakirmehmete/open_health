@@ -880,6 +880,7 @@ struct RootView: View {
             // A cached summary makes launch immediate; this forced load replaces it
             // with SQLite + model output without blanking the existing Today card.
             requestAutomaticSync()
+            IllnessAlert.requestAuthorization()
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.protectedDataDidBecomeAvailableNotification)) { _ in
             requestAutomaticSync()
@@ -1148,9 +1149,8 @@ struct RootView: View {
                             SleepDebtCard(debt: debt) { showSleepDebt = true }
                         }
 
-                        // Torch build: Oura's own illness model. Otherwise the shared
-                        // core's baseline comparison over the same four biomarkers.
-                        if let radar = s.symptomRadar, radar.available {
+                        // Torch build: Oura's own illness model (no model-free fallback).
+                        if let radar = s.symptomRadar {
                             ObsRule()
                             IllnessCard(illness: radar)
                         }
@@ -1299,6 +1299,7 @@ struct OuraApp: App {
         DiagStore.shared.bootstrap()
         Keychain.migrateAccessibility()
         BackgroundSync.register()
+        IllnessAlert.install()
         RingWatcher.shared.start()
         // The app is often alive in the background (ring link); catch the unlock.
         NotificationCenter.default.addObserver(forName: UIApplication.protectedDataDidBecomeAvailableNotification,

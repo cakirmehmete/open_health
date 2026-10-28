@@ -39,6 +39,7 @@ enum SummaryCache {
 
     static func save(_ summary: Summary) {
         guard summary.error == nil else { return }
+        IllnessAlert.check(summary)
         queue.async {
             guard let data = try? JSONEncoder().encode(CachedSummary(summary: summary, workouts: summary.workouts, illness: summary.illness, stress: summary.stress)) else { return }
             try? data.write(to: url, options: .atomic)

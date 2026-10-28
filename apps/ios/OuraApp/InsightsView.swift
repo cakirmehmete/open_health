@@ -262,7 +262,7 @@ struct InsightsView: View {
     }
 
     @ViewBuilder private func radarCard(_ s: Summary) -> some View {
-        if let radar = s.illness ?? s.symptoms, radar.available {
+        if let radar = s.symptomRadar {
             let flagged = radar.biomarkers.filter(\.indicatesSymptoms).count
             NavigationLink {
                 SymptomRadarDetail(radar: radar)

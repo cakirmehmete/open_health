@@ -16,7 +16,6 @@ pub mod hourly_hr;
 pub mod research_export;
 pub mod ring_time;
 pub mod sleep_score;
-pub mod symptoms;
 
 /// An unanchored ring-clock epoch at least this long is worth a warning.
 const UNANCHORED_WARN_H: f64 = 12.0;
@@ -1929,8 +1928,6 @@ pub fn build_summary(
     let mut nights_json = Vec::new();
     let mut asleep_by_day: std::collections::BTreeMap<i64, i32> = Default::default();
     let mut incomplete_sleep_days = std::collections::BTreeSet::new();
-    // (wake date, biomarkers) per night, oldest first — the Symptom Radar input.
-    let mut nightly_biomarkers: Vec<(String, symptoms::NightBiomarkers)> = Vec::new();
     // Causal personal baselines for the sleep score's physiology component: for each
     // main sleep (>= MIN_BASELINE_SLEEP_DS), only strictly preceding main-sleep nights
     // (`end_unix <= start_unix`) in resolved chronological order may contribute. Naps
@@ -2034,7 +2031,6 @@ pub fn build_summary(
         } else {
             None
         };
-        let wake_ymd = Some(ymd_label(end_unix, tz));
         // The official app's main hypnogram: the 30 s stages folded into 5-minute
         // blocks (Android `SleepPhaseConverter.aggregate30SecTo5Min`).
         let stages_5min = (!full_stages.is_empty())
@@ -2136,34 +2132,11 @@ pub fn build_summary(
                 prior_main_hrv.push((end_unix, hrv_mean));
             }
         }
-        if let Some(day) = wake_ymd.clone() {
-            nightly_biomarkers.push((
-                day,
-                symptoms::NightBiomarkers {
-                    skin_temp: nightly_skin_temp(&nt.temp),
-                    lowest_hr: night_rhr,
-                    hrv_ms: night_hrv,
-                    breath_rate: night_breath,
-                },
-            ));
-        }
     }
     nights_json.reverse();
 
     asleep_by_day.retain(|day, _| !incomplete_sleep_days.contains(day));
     let sleep_debt = sleep_debt_summary(&asleep_by_day);
-
-    // Symptom signs for the most recent night, judged against the nights before it.
-    // `nights` is oldest-first, so the last entry is tonight and everything before it
-    // is the baseline — tonight is deliberately excluded from its own comparison.
-    let symptoms = match nightly_biomarkers.split_last() {
-        Some(((date, tonight), history)) => {
-            let history: Vec<symptoms::NightBiomarkers> =
-                history.iter().map(|(_, marks)| *marks).collect();
-            symptoms::symptom_signs(*tonight, &history, date)
-        }
-        None => Value::Null,
-    };
 
     let activity = activity_raw
         .as_ref()
@@ -2535,10 +2508,8 @@ pub fn build_summary(
         "profile": demo.to_json(),
         "nights": nights_json,
         "sleep_debt": sleep_debt,
-        // Model-free Symptom Radar: the same four biomarkers the torch illness model
-        // eats, judged against the wearer's own baseline. Same JSON shape as
-        // IllnessResult so one card renders either source.
-        "symptoms": symptoms,
+        // Symptom Radar comes only from Oura's illness_detection model (the Python
+        // runner here, IllnessModel.swift on iOS); there is no model-free fallback.
         "illness": illness,
         "stress": stress,
         "cardio": cva,
