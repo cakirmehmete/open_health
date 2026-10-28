@@ -48,6 +48,15 @@ int oura_stepmotion(const char *model_path, const int64_t *timestamps_ms,
                     const float *raw, int n_raw, int64_t *out_timestamps_ms,
                     float *out_features, int max_rows);
 
+// Count steps with Oura's step_counter. `step` is N×11 decoded gait rows in the
+// AAD column order (oura_stepmotion's output after ActivityModel's reorder), one per
+// 10 s window; `motion` is M×8 0x47 rows. Timestamps are Unix ms. Writes each row's
+// window start (ms) and step count; returns the row count, or -1 (see
+// oura_activity_last_error).
+int oura_step_counter(const char *model_path, const int64_t *step_ts, const float *step, int n_step,
+                      const int64_t *motion_ts, const float *motion, int n_motion,
+                      int64_t *out_start_ms, float *out_steps, int max_rows);
+
 // Illness detection ("Symptom Radar", illness_detection_0_5_1). Mirrors
 // tools/run_illness_model.py. `series` is row-major 7×30 (index 0 = today, NaN =
 // missing): average_breath, average_heart_rate, lowest_heart_rate, average_hrv,

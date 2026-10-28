@@ -18,7 +18,7 @@ enum ActivityModel {
         70937: "meditation", 71201: "eating", 71227: "relax", 71239: "transport",
     ]
 
-    private struct InferenceFailure: Error, CustomStringConvertible {
+    struct InferenceFailure: Error, CustomStringConvertible {
         let description: String
         init(_ message: String) { description = message }
         static func bridge() -> Self {
@@ -27,7 +27,7 @@ enum ActivityModel {
         }
     }
 
-    private struct TimedRow {
+    struct TimedRow {
         let unixMinute: Double
         let values: [Float]
     }
@@ -465,7 +465,7 @@ enum ActivityModel {
         return (out[0] * 10).rounded() / 10
     }
 
-    private static func collectStepPackets(events: EventStore.Events, clock: EventStore.RingClock) -> [TimedRow] {
+    static func collectStepPackets(events: EventStore.Events, clock: EventStore.RingClock) -> [TimedRow] {
         var secondPackets: [Int64: Data] = [:]
         for event in events.restricted("tag=127") {
             guard let body = event.body, body.count == 14,
@@ -488,7 +488,7 @@ enum ActivityModel {
     /// Decode one day's (or a chunked slice of a day's) 27-col gait packets.
     /// Hiking days can be thousands of pairs; the old path fed the whole history
     /// as one tensor and jetsam-killed the app.
-    private static func decodeStepPackets(_ packets: [TimedRow]) throws -> [TimedRow] {
+    static func decodeStepPackets(_ packets: [TimedRow]) throws -> [TimedRow] {
         guard !packets.isEmpty else { return [] }
         guard let modelPath = ModelFiles.find("steps_motion_decoder")?.path
         else { throw InferenceFailure("step decoder model file is missing from the app bundle") }

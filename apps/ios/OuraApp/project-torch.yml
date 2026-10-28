@@ -72,6 +72,7 @@ targets:
       - path: NssaOps.h
       - path: CvaModel.swift
       - path: ActivityModel.swift
+      - path: StepCounter.swift
       - path: IllnessModel.swift
       - path: BreathingModel.swift
       - path: StressModel.swift
@@ -97,6 +98,7 @@ targets:
           - "sleepstaging_*"
           - "automatic_activity_detection_*.ptl"
           - "steps_motion_decoder_*.ptl"
+          - "step_counter_*.ptl"
           - "cva_[0-9]*.ptl"
           - "illness_detection_*.ptl"
           - "sleepnet_bdi_*.ptl"

@@ -782,7 +782,8 @@ final class HealthExport: ObservableObject {
                 add(distance, .meter(), st.distance_m ?? 0, start, end, "dist.\(day).\(Int((st.distance_m ?? 0).rounded()))")
                 continue
             }
-            for i in 0..<96 where slot.minutes[i] > 0 {
+            // Counted steps can fall in a minute the MET stream missed; keep them.
+            for i in 0..<96 where slot.minutes[i] > 0 || (i < slot.steps.count && slot.steps[i] > 0) {
                 // DST days are 23 or 25 h long; slots follow the wall clock like the core.
                 guard let a = cal.date(byAdding: .minute, value: i * 15, to: start),
                       let b = cal.date(byAdding: .minute, value: (i + 1) * 15, to: start) else { continue }

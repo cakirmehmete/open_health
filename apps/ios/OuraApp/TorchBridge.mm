@@ -30,11 +30,11 @@ struct ModuleSlot {
     std::unique_ptr<torch::jit::mobile::Module> module;
     std::string path;
 };
-static ModuleSlot g_sleepnet, g_cva, g_activity, g_stepmotion, g_illness, g_bdi, g_energy, g_stress;
+static ModuleSlot g_sleepnet, g_cva, g_activity, g_stepmotion, g_stepcounter, g_illness, g_bdi, g_energy, g_stress;
 
 void oura_torch_release(void) {
     std::lock_guard<std::mutex> lock(g_torch);
-    for (ModuleSlot *slot : {&g_sleepnet, &g_cva, &g_activity, &g_stepmotion, &g_illness, &g_bdi, &g_energy, &g_stress}) {
+    for (ModuleSlot *slot : {&g_sleepnet, &g_cva, &g_activity, &g_stepmotion, &g_stepcounter, &g_illness, &g_bdi, &g_energy, &g_stress}) {
         slot->module.reset();
         slot->path.clear();
     }
@@ -415,6 +415,44 @@ int oura_stepmotion(const char *model_path, const int64_t *timestamps_ms,
         return n;
     } catch (const std::exception &e) {
         return activityFailure(std::string("step decoder: ") + e.what());
+    }
+}
+
+int oura_step_counter(const char *model_path, const int64_t *step_ts, const float *step, int n_step,
+                      const int64_t *motion_ts, const float *motion, int n_motion,
+                      int64_t *out_start_ms, float *out_steps, int max_rows) {
+    activity_error.clear();
+    if (!model_path || !step_ts || !step || !out_start_ms || !out_steps)
+        return activityFailure("step counter: invalid model inputs or output buffer");
+    if (n_step <= 0 || max_rows <= 0) return 0;
+    std::lock_guard<std::mutex> lock(g_torch);
+    try {
+        auto &m = cachedModule(model_path, g_stepcounter.module, g_stepcounter.path);
+        auto ts = blobLong(step_ts, n_step);
+        auto data = blobFloat2d(step, n_step, 11);
+        // No motion is valid input (the model fills its defaults), but keep the shapes.
+        auto mts = n_motion > 0 ? blobLong(motion_ts, n_motion) : at::zeros({0}, at::kLong);
+        auto mdata = n_motion > 0 ? blobFloat2d(motion, n_motion, 8) : at::zeros({0, 8}, at::kFloat);
+        // NaN interval: one output row per input window, no re-binning.
+        auto interval = at::full({}, std::numeric_limits<float>::quiet_NaN(), at::kFloat);
+        auto result = m.forward({ts, data, mts, mdata, interval}).toTuple();
+        auto out_ts = result->elements()[0].toTensor().to(at::kLong).contiguous();
+        auto out_data = result->elements()[1].toTensor().to(at::kFloat).reshape({-1}).contiguous();
+        if (out_data.numel() == 0) return 0;
+        if (out_ts.dim() != 2 || out_ts.size(0) != out_data.numel()) {
+            return activityFailure("step counter: unexpected output shape, rank " + std::to_string(out_ts.dim()));
+        }
+        int n = std::min<int>((int)out_data.numel(), max_rows);
+        const int64_t *tp = out_ts.data_ptr<int64_t>();
+        const float *fp = out_data.data_ptr<float>();
+        const int64_t cols = out_ts.size(1);
+        for (int i = 0; i < n; i++) {
+            out_start_ms[i] = tp[i * cols];
+            out_steps[i] = fp[i];
+        }
+        return n;
+    } catch (const std::exception &e) {
+        return activityFailure(std::string("step counter: ") + e.what());
     }
 }
 

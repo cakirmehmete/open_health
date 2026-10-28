@@ -188,6 +188,8 @@ enum Core {
         var sleepErr: String?, cvaErr: String?, actErr: String?, illErr: String?, breathErr: String?, stressErr: String?
         var breathing: [String: Breathing] = [:]
         var stress: DaytimeStress?
+        var steps: [String: [Double]] = [:]
+        var stepsErr: String?
 
         var stageStarted = ProcessInfo.processInfo.systemUptime
         func stageFinished(_ stage: String) {
@@ -224,6 +226,7 @@ enum Core {
             illness = rIll.result; illErr = rIll.error
             breathing = BreathingModel.cached(nights: base.nights)
             stress = rStress.result; stressErr = rStress.error
+            steps = StepCounter.cached()
             dlog("models", "store unchanged since the last complete pass; event read skipped")
             stageFinished("cached")
             if AnalysisRun.cancelled { return previous ?? base }
@@ -274,10 +277,17 @@ enum Core {
                 let rStress = StressModel.run(events: events, clock: clock, knownDigest: storeDigest)
                 stress = rStress.result; stressErr = rStress.error
                 stageFinished("stress")
+                if AnalysisRun.cancelled { return previous ?? base }
+                if StepCounter.available {
+                    progress("Counting steps")
+                    let rSteps = StepCounter.run(events: events, clock: clock)
+                    steps = rSteps.days; stepsErr = rSteps.error
+                    stageFinished("steps")
+                }
             } else if let readErr {
                 // The shared read failed: every event-fed model is unavailable this
                 // pass. Surface one error; the publish below falls back to `previous`.
-                sleepErr = readErr; actErr = readErr; illErr = readErr; stressErr = readErr
+                sleepErr = readErr; actErr = readErr; illErr = readErr; stressErr = readErr; stepsErr = readErr
             }
         }
         if AnalysisRun.cancelled { return previous ?? base }
@@ -307,8 +317,9 @@ enum Core {
         s.workouts = (actErr == nil || !workouts.isEmpty) ? workouts : (previous?.workouts ?? workouts)
         s.illness = (illErr == nil || illness != nil) ? illness : previous?.illness
         s.stress = (stressErr == nil || stress != nil) ? stress : previous?.stress
+        if StepCounter.available { StepCounter.apply(steps, to: &s) }
         var seen = Set<String>()
-        s.modelErrors = [sleepErr, cvaErr, actErr, illErr, breathErr, stressErr].compactMap { $0 }
+        s.modelErrors = [sleepErr, cvaErr, actErr, illErr, breathErr, stressErr, stepsErr].compactMap { $0 }
             .filter { seen.insert($0).inserted }
         for error in s.modelErrors { dlog("models", "failed: \(error)") }
         return s
