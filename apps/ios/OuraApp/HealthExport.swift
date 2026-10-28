@@ -54,6 +54,7 @@ final class HealthExport: ObservableObject {
         if let t = HKObjectType.quantityType(forIdentifier: .oxygenSaturation) { types.insert(t) }
         if let t = HKObjectType.quantityType(forIdentifier: .respiratoryRate) { types.insert(t) }
         if let t = HKObjectType.quantityType(forIdentifier: .basalEnergyBurned) { types.insert(t) }
+        // Nothing writes VO2 max any more; kept so reconciliation removes the old estimates.
         if let t = HKObjectType.quantityType(forIdentifier: .vo2Max) { types.insert(t) }
         if let t = HKObjectType.quantityType(forIdentifier: .heartRateVariabilitySDNN) { types.insert(t) }
         types.insert(HKSeriesType.heartbeat())
@@ -323,7 +324,9 @@ final class HealthExport: ObservableObject {
         var parts = ["hrv-rmssd-v1:\(ringHRVType?.identifier ?? "unavailable")"]
         // Daytime HR comes from the event table, not the summary, so let an
         // otherwise unchanged summary still reconcile once per hour.
-        parts.append("ids-v2:\(Int(Date().timeIntervalSince1970 / 3600)):\(s.fitness?.vo2max ?? 0)")
+        // no-estimates-v1: one reconciliation removes the VO2 max, guessed sleep stages
+        // and step estimates earlier builds wrote.
+        parts.append("ids-v2:\(Int(Date().timeIntervalSince1970 / 3600)):no-estimates-v1")
         parts.append(contentsOf: s.workouts.filter { $0.isWorkout >= 0.5 }.map { "\($0.id):\($0.kcal ?? -1)" }.sorted())
         for n in s.nights {
             let st = n.hypnogram ?? []
@@ -344,7 +347,6 @@ final class HealthExport: ObservableObject {
         out.append(contentsOf: dailySamples(s.activity_daily, slots: s.activity_slots,
                                             workoutMetKcal: Self.workoutMetKcal(s)))
         out.append(contentsOf: daytimeHeartSamples(nights: s.nights))
-        out.append(contentsOf: fitnessSamples(s.fitness))
         return out
     }
 
@@ -366,20 +368,6 @@ final class HealthExport: ObservableObject {
                                     start: start, end: end,
                                     metadata: Self.meta("hrh.\(Int(bar.unix)).\(Int(bar.median.rounded()))"))
         }
-    }
-
-    /// The ring-derived VO2 max estimate, stamped on the day it was computed.
-    private func fitnessSamples(_ fitness: Fitness?) -> [HKObject] {
-        guard let type = HKObjectType.quantityType(forIdentifier: .vo2Max), canShare(type),
-              let vo2 = fitness?.vo2max, vo2 > 10, vo2 < 90 else { return [] }
-        // Timestamped when first estimated today, not at midnight; the sync id stays
-        // per-day, so later exports the same day keep this sample.
-        let day = Calendar.current.startOfDay(for: Date())
-        let at = Date()
-        let unit = HKUnit(from: "ml/kg*min")
-        return [HKQuantitySample(type: type, quantity: HKQuantity(unit: unit, doubleValue: vo2),
-                                 start: at, end: at,
-                                 metadata: Self.meta("vo2.\(Int(day.timeIntervalSince1970)).\(Int((vo2 * 10).rounded()))"))]
     }
 
     private static func meta(_ id: String) -> [String: Any] {
@@ -601,16 +589,13 @@ final class HealthExport: ObservableObject {
         return result
     }
 
-    /// The night's 30 s stages. Rings whose firmware stages sleep itself (Gen 3)
-    /// send a hypnogram; newer firmware leaves staging to Oura's proprietary phone
-    /// model, which this build doesn't ship. Without either, stage from the ring's
-    /// overnight HR, HRV and motion (oura-summary's `stage_night_from_signals`), so
-    /// Health still gets core/deep/REM/awake rather than an unstaged "In Bed".
-    static func sleepStages(_ night: NightRow) -> (stages: [Int], estimated: Bool)? {
-        if let stages = night.hypnogram, stages.count > 1 { return (stages, false) }
-        guard night.hasSignals, let stages = Sleep.estimateStages(night: night),
-              stages.contains(where: { (1...3).contains($0) }) else { return nil }
-        return (stages, true)
+    /// The night's 30 s stages, only when Oura staged it: the ring's own hypnogram
+    /// (Gen 3 firmware) or Oura's sleepstaging model on the phone. A night neither
+    /// staged gets only its In Bed window; no stages are guessed from HR and motion.
+    static func sleepStages(_ night: NightRow) -> [Int]? {
+        guard Sleep.isOuraStaging(night.staging_source),
+              let stages = night.hypnogram, stages.count > 1 else { return nil }
+        return stages
     }
 
     private func sleepSamples(_ night: NightRow) -> [HKObject] {
@@ -621,30 +606,29 @@ final class HealthExport: ObservableObject {
         let key = "\(night.start_ds ?? 0)"
         out.append(HKCategorySample(type: type, value: HKCategoryValueSleepAnalysis.inBed.rawValue,
                                     start: start, end: end, metadata: Self.meta("sleep.inbed.\(key)")))
-        guard let (stages, estimated) = Self.sleepStages(night) else { return out }
+        guard let stages = Self.sleepStages(night) else {
+            dlog("health", "night \(key): not staged by Oura's model, in bed only")
+            return out
+        }
         let epoch = end.timeIntervalSince(start) / Double(stages.count)
-        let runs = Self.sleepRuns(stages, estimated: estimated)
-        dlog("health", "night \(key): \(runs.count) sleep runs\(estimated ? " (estimated, asleep/awake only)" : "")")
+        let runs = Self.sleepRuns(stages)
+        dlog("health", "night \(key): \(runs.count) sleep runs")
         for run in runs {
             let a = start.addingTimeInterval(Double(run.from) * epoch)
             let b = start.addingTimeInterval(Double(run.to) * epoch)
-            var metadata = Self.meta("sleep.\(key).\(run.from).\(run.to).\(run.value.rawValue)")
-            if estimated { metadata["OpenOuraStaging"] = "estimate" }
             out.append(HKCategorySample(type: type, value: run.value.rawValue, start: a, end: max(b, a.addingTimeInterval(1)),
-                                        metadata: metadata))
+                                        metadata: Self.meta("sleep.\(key).\(run.from).\(run.to).\(run.value.rawValue)")))
         }
         return out
     }
 
-    /// Consecutive epochs of one Health sleep value. A measured hypnogram keeps its
-    /// stages; an estimated one only claims asleep vs awake, the part HR and motion
-    /// can tell apart, so readers don't score deep/REM that was never measured.
-    static func sleepRuns(_ stages: [Int], estimated: Bool) -> [(from: Int, to: Int, value: HKCategoryValueSleepAnalysis)] {
+    /// Consecutive epochs of one Health sleep value.
+    static func sleepRuns(_ stages: [Int]) -> [(from: Int, to: Int, value: HKCategoryValueSleepAnalysis)] {
         func value(_ code: Int) -> HKCategoryValueSleepAnalysis? {
             switch code {
-            case 1: return estimated ? .asleepUnspecified : .asleepDeep
-            case 2: return estimated ? .asleepUnspecified : .asleepCore
-            case 3: return estimated ? .asleepUnspecified : .asleepREM
+            case 1: return .asleepDeep
+            case 2: return .asleepCore
+            case 3: return .asleepREM
             case 4: return .awake
             default: return nil
             }

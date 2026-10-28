@@ -18,9 +18,9 @@ Default port `8090`; loopback-only.
 
 ## Enable Oura's models on desktop
 
-Without the private model files the dashboard still works — each night falls back to
-the built-in **signal estimate** (heart rate, HRV and motion), and the day view says
-so. To stage with Oura's own validated model instead:
+Without the private model files the dashboard still works, but nothing is guessed in
+their place: nights show no sleep stages, workouts no calories, days no step count.
+To stage with Oura's own model:
 
 1. **Place the models.** Put your locally-decrypted desktop `.pt` files (plus the
    sleep classifier) in `notes/models/` at the repo root — the first place the runners
@@ -57,7 +57,7 @@ so. To stage with Oura's own validated model instead:
    ```
 
    A hypnogram with no error means NSSA is live; a complaint names the missing file.
-   In the dashboard, a night with no "signal estimate" note is staged by Oura's model.
+   In the dashboard, a night with a stage legend is staged by Oura's model.
 
 ## In the dashboard
 

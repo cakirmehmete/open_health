@@ -271,7 +271,7 @@ function dayCard(d, ymd) {
   const ap = el("button", "day-part");
   ap.type = "button";
   const ds = (d.activity_daily || {})[ymd];
-  const stat = ds ? `${kfmt(ds.steps)} steps · ${Math.round(ds.active_kcal)} kcal` : "no activity totals";
+  const stat = ds ? `${ds.steps != null ? kfmt(ds.steps) + " steps · " : ""}${Math.round(ds.active_kcal)} kcal` : "no activity totals";
   ap.append(el("div", "dp-head",
     `<span class="dp-tag">Activity</span><span class="dp-meta">${stat}</span><span class="dp-chev"></span>`));
   const prof = (d.activity_profile || {})[ymd];
@@ -587,13 +587,9 @@ function renderStress(d) {
 function renderCardio(d) {
   const box = $("cardio");
   const cv = d.cardio;
-  const vo2 = d.fitness?.vo2max;
   box.innerHTML = "";
-  // VO₂max is model-free (from demographics), so it shows even without the CVA model.
-  const vo2Kv = vo2 != null ? el("div", "kv", `<div class="k">VO₂max estimate</div><div class="v">${vo2} ml/kg/min</div>`) : null;
   if (!cv || cv.vascular_age == null) {
     box.append(el("div", "error", cvaMissing(d).long));
-    if (vo2Kv) { const kvs = el("div", "kvs"); kvs.append(vo2Kv); box.append(kvs); }
     return;
   }
   box.append(el("div", "big-metric", `<span class="n">${cv.vascular_age}</span><span class="u">years vascular age</span>`));
@@ -601,7 +597,6 @@ function renderCardio(d) {
   const kvs = el("div", "kvs");
   kvs.append(el("div", "kv", `<div class="k">Pulse-wave velocity</div><div class="v">${cv.pwv_ms != null ? cv.pwv_ms + " m/s" : "—"}</div>`));
   kvs.append(el("div", "kv", `<div class="k">Segments analysed</div><div class="v">${num(cv.segments)}</div>`));
-  if (vo2Kv) kvs.append(vo2Kv);
   box.append(kvs);
 }
 
@@ -677,7 +672,6 @@ function openActDetail(s) {
         ${kv("Time", `${hhmm(s.start)}–${s.end}`)}
         ${kv("Duration", `${s.duration_min} min`)}
         ${s.kcal != null ? kv("Calories (Oura model)", `${Math.round(s.kcal).toLocaleString()} kcal`) : ""}
-        ${s.active_kcal != null ? kv(s.kcal != null ? "Calories (MET estimate)" : "Active calories", `${Math.round(s.active_kcal).toLocaleString()} kcal`) : ""}
         ${kv("Confidence", conf)}
         ${kv("Workout", work ? "yes" : "no")}
       </div>
@@ -1157,15 +1151,10 @@ function sleepSection(d, ymd, axis, cursor) {
   }
   if (staged && n.staging_complete === false)
     sec.append(el("p", "error", "Incomplete sleep analysis. Gaps mean no data, not awake time; sleep metrics are withheld."));
-  if (staged && n.staging_source === "signals") {
-    const note = el("p", "hr-note",
-      "Hypnogram from the local signal estimate (heart rate, HRV and motion), not Oura's sleep-staging model. " +
-      "To use Oura's validated model instead, install Python + torch and place the model files under notes/models/ " +
-      "(or set OURA_MODELS_DIR); see dashboard/README.md.");
-    sec.append(note);
-  }
   if (staged) sec.append(stageLegend());
-  else sec.append(el("p", "hr-note", "Sleep stages are unavailable for this night. The lanes below are what the ring recorded overnight."));
+  else sec.append(el("p", "hr-note",
+    "Oura's sleep-staging model didn't stage this night, so it has no stages (none are guessed). " +
+    "The lanes below are what the ring recorded overnight. If the model isn't set up, see dashboard/README.md."));
 
   const W = 1000, a = axis.frac(n.start_unix), b = axis.frac(n.end_unix);
   const rows = [];
@@ -1310,7 +1299,7 @@ function activitySection(d, ymd, axis, cursor) {
   const prof = (d.activity_profile || {})[ymd] || [];
   const strip = el("div", "stat-strip");
   strip.innerHTML =
-    statTile("Steps", ds ? Math.round(ds.steps || 0).toLocaleString() : "—") +
+    statTile("Steps", ds && ds.steps != null ? Math.round(ds.steps).toLocaleString() : "—") +
     statTile("Active energy", ds ? Math.round(ds.active_kcal || 0) + " kcal" : "—") +
     statTile("Total energy", ds ? Math.round(ds.total_kcal || 0) + " kcal" : "—") +
     (ds && ds.distance_m != null ? statTile("Distance", (ds.distance_m / 1000).toFixed(1) + " km") : "");
@@ -1551,7 +1540,7 @@ function openDaysBrowser(d, days) {
     row.type = "button";
     const left = el("div", "dl-left");
     left.append(el("div", "dl-date", dayTitle(ymd)));
-    left.append(el("div", "dl-sub", ds ? `${kfmt(ds.steps)} steps · ${Math.round(ds.active_kcal)} kcal` : (n ? "sleep only" : "—")));
+    left.append(el("div", "dl-sub", ds ? `${ds.steps != null ? kfmt(ds.steps) + " steps · " : ""}${Math.round(ds.active_kcal)} kcal` : (n ? "sleep only" : "—")));
     row.append(left);
     if (n && n.stages && n.stages.length) {
       const hyp = hypnogram(n.stages);

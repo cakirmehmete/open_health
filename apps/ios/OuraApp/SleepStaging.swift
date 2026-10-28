@@ -180,7 +180,7 @@ enum SleepStaging {
         var out: [String: StagedNightEntry] = [:]
         for night in nights where night.start_ds != nil {
             if let entry = cache[night.stagingKey], entry.windowKey == windowKey(night),
-               !entry.stages.isEmpty { out[night.stagingKey] = entry }
+               entry.isOuraStaging { out[night.stagingKey] = entry }
         }
         return out
     }
@@ -255,29 +255,36 @@ enum SleepStaging {
                 inputsList.append(inp)
             }
             let fpHex = fp.hex
-            if !force, let entry = cache[key], entry.fp == fpHex,
-               entry.windowKey == windowKey(night), !entry.stages.isEmpty {
-                result[key] = entry.stages
-                continue
+            if !force, let entry = cache[key], entry.fp == fpHex, entry.windowKey == windowKey(night) {
+                if entry.isOuraStaging { result[key] = entry.stages; continue }
+                // Oura's model already declined these exact inputs: no stages, no retry.
+                if entry.source == StagedNightEntry.unstaged { failures += 1; continue }
             }
             for inp in inputsList {
                 if let staged = stage(inp, demo: demo, modelPath: modelPath) { periods.append(staged) }
                 else { failed.append(inp.bedtime) }
             }
-            var stages: [Int]? = nil, source = "nssa", t0: Double? = nil
+            // Only Oura's model stages a night. When it can't (too little data, or its
+            // validator rejects the inputs) the night stays unstaged, as in the official
+            // app, rather than getting a hypnogram guessed from HR and motion.
+            var stages: [Int]? = nil, t0: Double? = nil
             if !periods.isEmpty {
                 stages = NssaInputs.gridStages(periods: periods, failed: failed,
                                                startMs: ms(startDs, cu), endMs: ms(endDs, cu))
                 var main = periods[0]
                 for p in periods.dropFirst() where p.codes.count > main.codes.count { main = p }
                 t0 = main.ts.first.map { Double($0) / 1000 }
-            } else if night.hasSignals, let est = Sleep.estimateStages(night: night) {
-                stages = est; source = "signals"
             }
-            guard let stages, !stages.isEmpty else { failures += 1; continue }
+            guard let stages, !stages.isEmpty else {
+                failures += 1
+                cache[key] = StagedNightEntry(fp: fpHex, stages: [], windowKey: windowKey(night),
+                                               source: StagedNightEntry.unstaged)
+                ModelCacheStore.save(ModelCacheStore.stagingFile, globalKey: globalKey, entries: cache)
+                continue
+            }
             result[key] = stages
             cache[key] = StagedNightEntry(fp: fpHex, stages: stages, windowKey: windowKey(night),
-                                           source: source, t0Unix: t0)
+                                           source: "nssa", t0Unix: t0)
             ModelCacheStore.save(ModelCacheStore.stagingFile, globalKey: globalKey, entries: cache)
         }
         guard events.error == nil, !AnalysisRun.cancelled else { return ([:], "analysis interrupted") }

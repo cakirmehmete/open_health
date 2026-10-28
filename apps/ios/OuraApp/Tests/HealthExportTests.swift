@@ -98,38 +98,25 @@ final class HealthExportTests: XCTestCase {
         XCTAssertEqual(HealthExport.fingerprint(Summary()), HealthExport.fingerprint(Summary()))
     }
 
-    func testUnstagedNightGetsStagesFromSignals() throws {
-        // Newer ring firmware sends no hypnogram; the night still reaches Health staged.
+    func testOnlyOuraStagedNightsReachHealthWithStages() {
+        // A night Oura's model didn't stage gets no stages, however much HR and motion
+        // it has: Health keeps only its In Bed window.
         var night = NightRow(ymd: "2026-10-10", start_ds: 100, start: "23:00", end: "07:00")
-        let start: Int64 = 1_791_000_000, end = start + 8 * 3600
-        night.start_unix = start
-        night.end_unix = end
-        var series = NightTimedSeries()
-        for (i, t) in stride(from: Double(start), through: Double(end), by: 300).enumerated() {
-            let phase = (t - Double(start)) / Double(end - start)
-            series.hr.append([t, 56 - 10 * sin(phase * .pi)])
-            series.hrv.append([t, 45 + 30 * sin(phase * .pi)])
-            series.motion.append([t, i % 37 == 0 ? 9 : 1])
-        }
-        night.series_t = series
-        let (stages, estimated) = try XCTUnwrap(HealthExport.sleepStages(night))
-        XCTAssertTrue(estimated)
-        XCTAssertEqual(stages.count, 960)
-        XCTAssertTrue(stages.contains { (1...3).contains($0) })
-
+        night.series_t = NightTimedSeries(hr: [[0, 55], [300, 50]], hrv: [[0, 40], [300, 60]], motion: [[0, 1]])
+        XCTAssertNil(HealthExport.sleepStages(night))
         night.stages_full = [2, 2, 1, 3, 4]
-        XCTAssertEqual(HealthExport.sleepStages(night)?.estimated, false)
-        XCTAssertNil(HealthExport.sleepStages(NightRow(ymd: "2026-10-10", start_ds: 100, start: "23:00", end: "07:00")))
+        night.staging_source = "signals"
+        XCTAssertNil(HealthExport.sleepStages(night))
+        night.staging_source = "nssa"
+        XCTAssertEqual(HealthExport.sleepStages(night), [2, 2, 1, 3, 4])
+        night.staging_source = "ring"
+        XCTAssertEqual(HealthExport.sleepStages(night), [2, 2, 1, 3, 4])
     }
 
-    func testEstimatedStagesOnlyClaimAsleepOrAwake() {
-        let stages = [4, 4, 2, 1, 1, 3, 0, 2, 4]
-        let measured = HealthExport.sleepRuns(stages, estimated: false)
-        XCTAssertEqual(measured.map(\.value), [.awake, .asleepCore, .asleepDeep, .asleepREM, .asleepCore, .awake])
-        let estimated = HealthExport.sleepRuns(stages, estimated: true)
-        XCTAssertEqual(estimated.map(\.value), [.awake, .asleepUnspecified, .asleepUnspecified, .awake])
-        XCTAssertEqual(estimated.map(\.from), [0, 2, 7, 8])
-        XCTAssertEqual(estimated.map(\.to), [2, 6, 8, 9])
+    func testSleepRunsKeepOurasStages() {
+        let runs = HealthExport.sleepRuns([4, 4, 2, 1, 1, 3, 0, 2, 4])
+        XCTAssertEqual(runs.map(\.value), [.awake, .asleepCore, .asleepDeep, .asleepREM, .asleepCore, .awake])
+        XCTAssertEqual(runs.map(\.from), [0, 2, 3, 5, 7, 8])
     }
 
     func testWorkoutMetKcalCoversOnlyModelScoredWorkoutMinutes() {

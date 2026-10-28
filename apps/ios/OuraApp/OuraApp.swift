@@ -1155,9 +1155,8 @@ struct RootView: View {
                             IllnessCard(illness: radar)
                         }
 
-                        // Cardiovascular estimates belong together: vascular age/PWV
-                        // from raw PPG plus the demographic VO₂max estimate.
-                        if s.cardio?.vascular_age != nil || s.fitness?.vo2max != nil {
+                        // Oura's CVA model: vascular age/PWV from raw PPG.
+                        if s.cardio?.vascular_age != nil {
                             ObsRule()
                             ObsTag("cardiovascular", icon: "heart.fill")
                             VStack(spacing: 12) {
@@ -1166,9 +1165,6 @@ struct RootView: View {
                                     if let ca = cv.chronological_age { ObsStat(label: "vs your age", value: relAge(va - ca)) }
                                     if let pwv = cv.pwv_ms { ObsStat(label: "pulse-wave velocity", value: String(format: "%.2f m/s", pwv)) }
                                     if let seg = cv.segments { ObsStat(label: "segments analysed", value: "\(seg)") }
-                                }
-                                if let vo = s.fitness?.vo2max {
-                                    ObsStat(label: "vo₂max estimate", value: String(format: "%.1f ml/kg/min", vo))
                                 }
                             }
                         }

@@ -810,547 +810,6 @@ fn ring_hypnograms(
     out
 }
 
-fn interp_series_at_ds(pts: &[(i64, f64)], ds: i64) -> f64 {
-    if pts.is_empty() {
-        return 0.0;
-    }
-    if ds <= pts[0].0 {
-        return pts[0].1;
-    }
-    let last = pts.len() - 1;
-    if ds >= pts[last].0 {
-        return pts[last].1;
-    }
-    let mut lo = 0usize;
-    let mut hi = last;
-    while lo + 1 < hi {
-        let mid = (lo + hi) / 2;
-        if pts[mid].0 <= ds {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    let (t0, v0) = pts[lo];
-    let (t1, v1) = pts[hi];
-    if t1 <= t0 {
-        return v0;
-    }
-    let f = (ds - t0) as f64 / (t1 - t0) as f64;
-    v0 * (1.0 - f) + v1 * f
-}
-
-/// When SleepNet runs on a night whose IBI stream lacks PPG pulse amplitude (e.g. Oura
-/// Ring 4 `green_ibi_quality_event` `0x80`), it distinguishes WAKE (4), REM (3), and
-/// NREM (2) but collapses slow-wave N3 into LIGHT (2), yielding 0 DEEP (1) epochs.
-/// Recover consolidated N3 bouts inside LIGHT (2) using nocturnal HR, HRV, and motion:
-/// contiguous motionless NREM runs (>= 6 min) with low HR relative to the local
-/// circadian trend, weighted by homeostatic Process S across ultradian sleep cycles.
-pub fn refine_deep_stages(
-    stages: &[i64],
-    hr_t: &[(i64, f64)],
-    motion_t: &[(i64, f64)],
-    start_ds: i64,
-    end_ds: i64,
-) -> Vec<i64> {
-    refine_deep_stages_with_hrv(stages, hr_t, &[], motion_t, start_ds, end_ds)
-}
-
-pub fn refine_deep_stages_with_hrv(
-    stages: &[i64],
-    hr_t: &[(i64, f64)],
-    hrv_t: &[(i64, f64)],
-    motion_t: &[(i64, f64)],
-    start_ds: i64,
-    end_ds: i64,
-) -> Vec<i64> {
-    let n = stages.len();
-    if n < 40 || stages.contains(&1) || end_ds <= start_ds {
-        return stages.to_vec();
-    }
-    let light_count = stages.iter().filter(|&&c| c == 2).count();
-    if light_count < 20 {
-        return stages.to_vec();
-    }
-    let mut hr_pts: Vec<(i64, f64)> = hr_t
-        .iter()
-        .filter_map(|&(ds, v)| (v > 30.0 && v < 140.0).then_some((ds, v)))
-        .collect();
-    hr_pts.sort_by_key(|&(ds, _)| ds);
-    if hr_pts.len() < 6 {
-        return stages.to_vec();
-    }
-    let mut hrv_pts: Vec<(i64, f64)> = hrv_t
-        .iter()
-        .filter_map(|&(ds, v)| (v > 0.0).then_some((ds, v)))
-        .collect();
-    hrv_pts.sort_by_key(|&(ds, _)| ds);
-
-    let span_ds = (end_ds - start_ds).max(1) as f64;
-    let epoch_ds = span_ds / (n as f64);
-
-    let hr_ep: Vec<f64> = (0..n)
-        .map(|i| {
-            let ds = start_ds + (((i as f64) + 0.5) * epoch_ds).round() as i64;
-            interp_series_at_ds(&hr_pts, ds)
-        })
-        .collect();
-    let hrv_ep: Vec<f64> = if hrv_pts.is_empty() {
-        vec![0.0; n]
-    } else {
-        (0..n)
-            .map(|i| {
-                let ds = start_ds + (((i as f64) + 0.5) * epoch_ds).round() as i64;
-                interp_series_at_ds(&hrv_pts, ds)
-            })
-            .collect()
-    };
-
-    let mut epoch_mo = vec![0.0f64; n];
-    for &(ds, val) in motion_t {
-        let f = (ds - start_ds) as f64 / span_ds;
-        if (-1e-6..=1.0 + 1e-6).contains(&f) {
-            let idx = ((f * n as f64).floor() as isize).clamp(0, n as isize - 1) as usize;
-            epoch_mo[idx] = epoch_mo[idx].max(val);
-        }
-    }
-
-    let hr_min = hr_ep.iter().copied().fold(f64::INFINITY, f64::min);
-    let hr_max = hr_ep.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    if hr_max - hr_min < 2.0 {
-        return stages.to_vec();
-    }
-
-    // Moving +/- 45-minute (90-epoch) HR trend so early-night N3 (when metabolic HR is
-    // still descending) is judged against its local circadian baseline rather than the
-    // 04:00 AM circadian nadir.
-    let local_hr: Vec<f64> = (0..n)
-        .map(|i| {
-            let lo = i.saturating_sub(90);
-            let hi = (i + 91).min(n);
-            hr_ep[lo..hi].iter().sum::<f64>() / ((hi - lo).max(1) as f64)
-        })
-        .collect();
-
-    let mut sorted_hrv: Vec<f64> = hrv_pts.iter().map(|&(_, v)| v).collect();
-    sorted_hrv.sort_by(|a, b| a.total_cmp(b));
-    let hrv_med = if sorted_hrv.is_empty() {
-        0.0
-    } else {
-        sorted_hrv[sorted_hrv.len() / 2]
-    };
-
-    let sleep_indices: Vec<usize> = stages
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &c)| (1..=3).contains(&c).then_some(i))
-        .collect();
-    if sleep_indices.len() < 20 {
-        return stages.to_vec();
-    }
-    let onset = sleep_indices[0];
-    let final_sleep = sleep_indices[sleep_indices.len() - 1];
-    let sleep_span = final_sleep.saturating_sub(onset).max(1) as f64;
-
-    let mut runs: Vec<(usize, usize)> = Vec::new();
-    let mut i = 0usize;
-    while i < n {
-        if stages[i] == 2 && epoch_mo[i] <= 1.0 {
-            let mut j = i;
-            while j < n && stages[j] == 2 && epoch_mo[j] <= 1.0 {
-                j += 1;
-            }
-            if j - i >= 12 {
-                runs.push((i, j));
-            }
-            i = j;
-        } else {
-            i += 1;
-        }
-    }
-    if runs.is_empty() {
-        return stages.to_vec();
-    }
-
-    // Segment synthetic multi-hour unbroken runs (> 180 epochs = 90 min) into ~45-min
-    // windows so each ultradian cycle can be evaluated independently.
-    let mut segmented_runs: Vec<(usize, usize)> = Vec::new();
-    for (r_start, r_end) in runs {
-        if r_end - r_start <= 180 {
-            segmented_runs.push((r_start, r_end));
-        } else {
-            let mut cur = r_start;
-            while cur + 12 <= r_end {
-                let mut seg_end = (cur + 90).min(r_end);
-                if r_end - seg_end < 24 {
-                    seg_end = r_end;
-                }
-                segmented_runs.push((cur, seg_end));
-                cur = seg_end;
-            }
-        }
-    }
-
-    let first_cycle_max_len = segmented_runs
-        .iter()
-        .filter_map(|&(s, e)| {
-            let frac = (((s + e) as f64 / 2.0) - onset as f64) / sleep_span;
-            (frac < 0.16).then_some(e - s)
-        })
-        .max()
-        .unwrap_or(0);
-
-    let mut scored_runs: Vec<(f64, usize, usize, f64, f64)> = Vec::new();
-    for (r_start, r_end) in segmented_runs {
-        let run_len = r_end - r_start;
-        let mid = (r_start + r_end) as f64 / 2.0;
-        let sleep_frac = ((mid - onset as f64) / sleep_span).max(0.0);
-        if sleep_frac > 0.56 {
-            continue;
-        }
-        // Skip brief initial settling before an early arousal when a long consolidated
-        // first-cycle NREM block immediately follows.
-        if sleep_frac < 0.12
-            && first_cycle_max_len >= 40
-            && (run_len as f64) < (first_cycle_max_len as f64) * 0.65
-        {
-            continue;
-        }
-        let mean_hr = hr_ep[r_start..r_end].iter().sum::<f64>() / (run_len as f64);
-        let mean_loc_hr = local_hr[r_start..r_end].iter().sum::<f64>() / (run_len as f64);
-        let prev_end = r_start.max(1);
-        let prev_hr = hr_ep[..prev_end].iter().sum::<f64>() / (prev_end as f64);
-        let mean_hrv = if hrv_pts.is_empty() {
-            0.0
-        } else {
-            hrv_ep[r_start..r_end].iter().sum::<f64>() / (run_len as f64)
-        };
-        let hr_dip = mean_loc_hr - mean_hr;
-        let prev_dip = prev_hr - mean_hr;
-        // Require genuine cardiac slowing relative to either the preceding night or the
-        // local circadian window (rejects flat or monotonically rising HR profiles).
-        if prev_dip < -0.25 || (prev_dip < 0.10 && hr_dip < 0.35) {
-            continue;
-        }
-        // Exclude phasic REM autonomic surges (high HRV without an NREM HR dip) after
-        // the first NREM cycle.
-        if !sorted_hrv.is_empty()
-            && sleep_frac > 0.12
-            && mean_hrv > (hrv_med * 1.15).max(38.0)
-            && hr_dip < 2.0
-        {
-            continue;
-        }
-        let homeo = (-2.2 * sleep_frac).exp();
-        let dur_bonus = ((run_len.saturating_sub(12) as f64) / 48.0).clamp(0.0, 1.0);
-        let dip_bonus = (hr_dip / 3.0).clamp(-0.5, 0.6);
-        let score = homeo * 0.55 + dur_bonus * 0.35 + dip_bonus * 0.25;
-        scored_runs.push((score, r_start, r_end, sleep_frac, hr_dip));
-    }
-
-    scored_runs.sort_by(|a, b| b.0.total_cmp(&a.0));
-    let asleep_epochs = sleep_indices.len();
-    let target_deep = ((asleep_epochs as f64 * 0.105).round() as usize).max(12);
-    let mut out = stages.to_vec();
-    let mut selected_centers: Vec<isize> = Vec::new();
-    let mut deep_count = 0usize;
-
-    for (_score, r_start, r_end, sleep_frac, hr_dip) in scored_runs {
-        if deep_count >= target_deep {
-            break;
-        }
-        let run_len = r_end - r_start;
-        let mid = ((r_start + r_end) / 2) as isize;
-        // One primary SWS core per ~90-minute ultradian sleep cycle (>= 55 min apart).
-        if selected_centers.iter().any(|&c| (mid - c).abs() < 110) {
-            continue;
-        }
-        let remaining = target_deep - deep_count;
-        if remaining < 8 {
-            break;
-        }
-        let (s_idx, e_idx) = if sleep_frac < 0.16 {
-            let lead = if r_start <= onset + 12 {
-                2
-            } else {
-                ((run_len.saturating_sub(12)) / 5).clamp(2, 10)
-            };
-            let tail = ((run_len.saturating_sub(12 + lead)) / 6).clamp(1, 4);
-            let max_bout = 56.min(run_len.saturating_sub(lead + tail)).min(remaining);
-            if max_bout < 8 {
-                continue;
-            }
-            let search_end = r_end.saturating_sub(tail + max_bout).max(r_start + lead);
-            let mut best_s = r_start + lead;
-            let mut best_hr = f64::INFINITY;
-            for cand_s in (r_start + lead)..=search_end {
-                let m_hr: f64 =
-                    hr_ep[cand_s..cand_s + max_bout].iter().sum::<f64>() / (max_bout as f64);
-                if m_hr < best_hr {
-                    best_hr = m_hr;
-                    best_s = cand_s;
-                }
-            }
-            (best_s, best_s + max_bout)
-        } else if sleep_frac < 0.36 {
-            let cap = if hr_dip >= 2.0 {
-                ((run_len * 9) / 20).clamp(10, 42)
-            } else {
-                ((run_len * 2) / 5).clamp(10, 26)
-            };
-            let max_bout = cap.min(remaining).min(run_len);
-            let tail = ((run_len.saturating_sub(max_bout)) / 4).clamp(1, 4);
-            let e = r_end.saturating_sub(tail);
-            let s = e.saturating_sub(max_bout).max(r_start + 4.min(run_len));
-            (s, e)
-        } else {
-            let max_bout = ((run_len * 2) / 5).clamp(8, 22).min(remaining).min(run_len);
-            let s = r_start + (run_len.saturating_sub(max_bout)) / 2;
-            (s, s + max_bout)
-        };
-        if e_idx <= s_idx || e_idx - s_idx < 8 {
-            continue;
-        }
-        for cell in &mut out[s_idx..e_idx] {
-            *cell = 1;
-        }
-        deep_count += e_idx - s_idx;
-        selected_centers.push(((s_idx + e_idx) / 2) as isize);
-    }
-    out
-}
-
-/// Estimate 30-second sleep stages (`1=DEEP, 2=LIGHT, 3=REM, 4=WAKE`) from a night's
-/// physiological streams (`hr_t`, `hrv_t`, `motion_t`) when neither the proprietary
-/// Torch model nor ring-side `sleep_phase_data` is available.
-pub fn stage_night_from_signals(
-    start_ds: i64,
-    end_ds: i64,
-    hr_t: &[(i64, f64)],
-    hrv_t: &[(i64, f64)],
-    motion_t: &[(i64, f64)],
-) -> Vec<i64> {
-    if end_ds <= start_ds {
-        return Vec::new();
-    }
-    let epochs = ((end_ds - start_ds) / 300).max(1) as usize;
-    if epochs < 120 {
-        return Vec::new();
-    }
-    let mut hr_pts: Vec<(i64, f64)> = hr_t
-        .iter()
-        .filter_map(|&(ds, v)| (v > 30.0 && v < 140.0).then_some((ds, v)))
-        .collect();
-    hr_pts.sort_by_key(|&(ds, _)| ds);
-    if hr_pts.len() < 12 {
-        return Vec::new();
-    }
-    let mut hrv_pts: Vec<(i64, f64)> = hrv_t
-        .iter()
-        .filter_map(|&(ds, v)| (v > 0.0).then_some((ds, v)))
-        .collect();
-    hrv_pts.sort_by_key(|&(ds, _)| ds);
-
-    let span_ds = (end_ds - start_ds).max(1) as f64;
-    let epoch_ds = span_ds / (epochs as f64);
-
-    let hr_ep: Vec<f64> = (0..epochs)
-        .map(|i| {
-            let ds = start_ds + (((i as f64) + 0.5) * epoch_ds).round() as i64;
-            interp_series_at_ds(&hr_pts, ds)
-        })
-        .collect();
-    let hrv_raw: Vec<f64> = if hrv_pts.is_empty() {
-        vec![0.0; epochs]
-    } else {
-        (0..epochs)
-            .map(|i| {
-                let ds = start_ds + (((i as f64) + 0.5) * epoch_ds).round() as i64;
-                interp_series_at_ds(&hrv_pts, ds)
-            })
-            .collect()
-    };
-    let hrv_ep: Vec<f64> = (0..epochs)
-        .map(|i| {
-            let lo = i.saturating_sub(12);
-            let hi = (i + 13).min(epochs);
-            hrv_raw[lo..hi].iter().sum::<f64>() / ((hi - lo).max(1) as f64)
-        })
-        .collect();
-
-    let mut epoch_mo = vec![0.0f64; epochs];
-    for &(ds, val) in motion_t {
-        let f = (ds - start_ds) as f64 / span_ds;
-        if (-1e-6..=1.0 + 1e-6).contains(&f) {
-            let idx = ((f * epochs as f64).floor() as isize).clamp(0, epochs as isize - 1) as usize;
-            epoch_mo[idx] = epoch_mo[idx].max(val);
-        }
-    }
-
-    let mut sorted_hr: Vec<f64> = hr_ep.clone();
-    sorted_hr.sort_by(|a, b| a.total_cmp(b));
-    let hr_med = sorted_hr[sorted_hr.len() / 2];
-
-    let (hrv_med, hrv_p62, hrv_p80) = if hrv_pts.is_empty() {
-        (0.0, 0.0, 0.0)
-    } else {
-        let mut sorted_hrv: Vec<f64> = hrv_ep.clone();
-        sorted_hrv.sort_by(|a, b| a.total_cmp(b));
-        let n_h = sorted_hrv.len() - 1;
-        (
-            sorted_hrv[n_h / 2],
-            sorted_hrv[(n_h * 62) / 100],
-            sorted_hrv[(n_h * 80) / 100],
-        )
-    };
-
-    let mut stages = vec![2i64; epochs];
-    let mut onset = 0usize;
-    let max_onset = (epochs / 4).min(120);
-    for i in 0..max_onset {
-        let end_chk = (i + 10).min(epochs);
-        if (i..end_chk).all(|k| epoch_mo[k] <= 4.0) {
-            onset = i;
-            break;
-        }
-    }
-    for cell in &mut stages[..onset] {
-        *cell = 4;
-    }
-
-    let mut wake_end = epochs;
-    let min_wake_end = onset.max(epochs.saturating_sub(90));
-    let mut found_quiet_end = false;
-    for i in (min_wake_end..epochs).rev() {
-        let lo_chk = i.saturating_sub(20).max(onset);
-        if (lo_chk..=i).all(|k| epoch_mo[k] <= 2.0) {
-            wake_end = i + 1;
-            found_quiet_end = true;
-            break;
-        }
-    }
-    if !found_quiet_end {
-        while wake_end > min_wake_end && epoch_mo[wake_end - 1] >= 4.0 {
-            wake_end -= 1;
-        }
-    }
-    for cell in &mut stages[wake_end..epochs] {
-        *cell = 4;
-    }
-
-    // Mid-night brief awakenings: paint a 3-epoch (1.5 min) arousal around substantial
-    // movement so it survives 5-epoch mode smoothing without inflating WASO into 2.5-min blocks.
-    for i in onset..wake_end {
-        let lo_n = i.saturating_sub(4).max(onset);
-        let hi_n = (i + 5).min(wake_end);
-        let near_mo: f64 = epoch_mo[lo_n..hi_n].iter().sum();
-        if epoch_mo[i] >= 8.0 || (epoch_mo[i] >= 5.0 && near_mo >= 10.0) {
-            let lo = i.saturating_sub(1).max(onset);
-            let hi = (i + 2).min(wake_end);
-            for cell in &mut stages[lo..hi] {
-                *cell = 4;
-            }
-        }
-    }
-
-    // 1) Recover N3 slow-wave sleep first on unfragmented motionless NREM stretches.
-    let mut refined =
-        refine_deep_stages_with_hrv(&stages, &hr_pts, &hrv_pts, motion_t, start_ds, end_ds);
-
-    // 2) Score REM on remaining Light (2) epochs using ultradian ~90-minute cycle phase
-    //    combined with nocturnal HRV surges.
-    let rem_start = (onset + 90).min(wake_end);
-    let rem_end = wake_end.saturating_sub(2).max(rem_start);
-    let sleep_span = (wake_end.saturating_sub(onset)).max(1) as f64;
-    for i in rem_start..rem_end {
-        if refined[i] != 2 || epoch_mo[i] > 2.0 {
-            continue;
-        }
-        let frac = (i - onset) as f64 / sleep_span;
-        let cycle_pos = ((i - onset) % 176) as f64 / 176.0;
-        let in_rem_phase = (0.56..=0.90).contains(&cycle_pos);
-        let is_rem = if !hrv_pts.is_empty() && hrv_p80 > hrv_med {
-            let hrv_v = hrv_ep[i];
-            (in_rem_phase && hrv_v >= hrv_p62)
-                || (frac >= 0.30 && hrv_v >= hrv_p80)
-                || (frac >= 0.80 && in_rem_phase && hrv_v >= hrv_med * 0.90)
-        } else {
-            in_rem_phase && (frac >= 0.35 || hr_ep[i] >= hr_med - 0.5)
-        };
-        if is_rem {
-            refined[i] = 3;
-        }
-    }
-    smooth_stages(&refined, 5)
-}
-
-/// Fallback batch stager for desktop/CLI runs when the proprietary `.pt` model is
-/// unavailable on the machine. Reads nocturnal `hrv_event` (`0x5d`) and `motion_event`
-/// (`0x47`) streams from `db` and returns the same JSON batch shape as `run_sleep_model.py`.
-pub fn stage_nights_from_signals(db: &Path, sleep_ranges: &[[i64; 3]]) -> Option<Value> {
-    if sleep_ranges.is_empty() {
-        return Some(Value::Array(Vec::new()));
-    }
-    let store = Store::open_read_only(db).ok()?;
-    let events = store.decoded_events().ok()?;
-    let mut results = Vec::with_capacity(sleep_ranges.len());
-    for &[start_ds, end_ds, captured_unix] in sleep_ranges {
-        let mut hr_t = Vec::new();
-        let mut hrv_t = Vec::new();
-        let mut motion_t = Vec::new();
-        for (ds, tag, jstr, _cu) in &events {
-            if *ds < start_ds - 600 || *ds > end_ds + 600 {
-                continue;
-            }
-            if *tag == 0x5d {
-                if let Ok(v) = serde_json::from_str::<Value>(jstr) {
-                    let step_ds = hrv_step_ds(&v);
-                    if let Some(a) = v["hr_bpm"].as_array() {
-                        hr_t.extend(packed_series(*ds, a, step_ds).filter(|&(_, val)| val > 0.0));
-                    }
-                    if let Some(a) = v["rmssd_ms"].as_array() {
-                        hrv_t.extend(packed_series(*ds, a, step_ds).filter(|&(_, val)| val > 0.0));
-                    }
-                }
-            } else if *tag == 0x47 {
-                if let Ok(v) = serde_json::from_str::<Value>(jstr) {
-                    if let Some(s) = v["motion_seconds"].as_f64() {
-                        motion_t.push((*ds, s));
-                    }
-                }
-            }
-        }
-        hr_t.sort_by_key(|&(ds, _)| ds);
-        hrv_t.sort_by_key(|&(ds, _)| ds);
-        motion_t.sort_by_key(|&(ds, _)| ds);
-        let stages = stage_night_from_signals(start_ds, end_ds, &hr_t, &hrv_t, &motion_t);
-        if stages.is_empty() {
-            results.push(Value::Null);
-            continue;
-        }
-        let n = stages.len() as f64;
-        let pct =
-            |code: i64| (stages.iter().filter(|&&c| c == code).count() as f64 / n * 100.0).round();
-        let asleep = stages.iter().filter(|&&c| (1..=3).contains(&c)).count() as f64;
-        results.push(json!({
-            "start_ds": start_ds,
-            "end_ds": end_ds,
-            "captured_unix": captured_unix,
-            "epochs": stages.len(),
-            "in_bed_min": n * 0.5,
-            "asleep_min": asleep * 0.5,
-            "efficiency_pct": (asleep / n * 100.0).round(),
-            "deep_pct": pct(1),
-            "light_pct": pct(2),
-            "rem_pct": pct(3),
-            "wake_pct": pct(4),
-            "source": "signals",
-            "stages": stages,
-        }));
-    }
-    Some(Value::Array(results))
-}
-
 /// Nights the ring recorded but never declared.
 ///
 /// `bedtime_period` is the ring's own verdict and is trusted first, but it is not
@@ -1910,31 +1369,6 @@ pub fn aggregate_30s_to_5min(stages: &[i64]) -> Vec<i64> {
         .collect()
 }
 
-fn smooth_stages(vals: &[i64], win: usize) -> Vec<i64> {
-    if vals.len() < win || win < 3 {
-        return vals.to_vec();
-    }
-    let half = win / 2;
-    (0..vals.len())
-        .map(|i| {
-            if vals[i] == 0 {
-                return 0;
-            }
-            let a = i.saturating_sub(half);
-            let b = (i + half + 1).min(vals.len());
-            let mut counts = [0u32; 5];
-            for &s in &vals[a..b] {
-                if (1..=4).contains(&s) {
-                    counts[s as usize] += 1;
-                }
-            }
-            (1..=4)
-                .max_by_key(|&k| counts[k as usize])
-                .unwrap_or(vals[i])
-        })
-        .collect()
-}
-
 /// Bucket-average a dense value series down to at most `n` points, so a per-sample
 /// signal (SpO₂ has tens of thousands of samples/night) stays a light payload while
 /// keeping its shape for the lane charts.
@@ -2466,6 +1900,9 @@ pub fn build_summary(
     for (start_ds, hypnogram) in ring_hypnograms(&ring_sleeps, &nights, unix_s_at) {
         hyps.entry(start_ds).or_insert(hypnogram);
     }
+    // Only Oura staged nights: a runner's hypnogram from any other source is dropped
+    // and its night stays unstaged rather than estimated.
+    hyps.retain(|_, h| is_oura_staging(h["source"].as_str()));
 
     nights.sort_by(|a, b| {
         unix_s_at(a.start_ds, a.captured_unix)
@@ -2508,32 +1945,11 @@ pub fn build_summary(
             .and_then(|h| h["stages"].as_array())
             .map(|s| s.iter().filter_map(|x| x.as_i64()).collect())
             .unwrap_or_default();
-        // Oura's own hypnograms (NSSA on the phone, or the ring's sleep_phase_data) are
-        // shown verbatim: the official app neither smooths them again nor invents deep
-        // sleep. Only our signal-derived estimate gets the ≈2.5 min majority filter and
-        // the N3 recovery, for the displayed hypnogram AND the derived metrics alike.
+        // Oura's own hypnograms (NSSA, or the ring's sleep_phase_data) are shown
+        // verbatim: the official app neither smooths them again nor invents deep sleep.
+        // `hyps` holds nothing else (see the retain above).
         let staging_source = hyp.and_then(|h| h["source"].as_str());
-        let oura_stages = is_oura_staging(staging_source);
-        let mut full_stages = if oura_stages {
-            raw_stages.clone()
-        } else {
-            smooth_stages(&raw_stages, 5)
-        };
-        if !oura_stages
-            && !full_stages.is_empty()
-            && !full_stages.contains(&1)
-            && hyp.and_then(|h| h["deep_pct"].as_f64()).unwrap_or(0.0) == 0.0
-            && nt.hr_t.len() >= 12
-        {
-            full_stages = refine_deep_stages_with_hrv(
-                &full_stages,
-                &nt.hr_t,
-                &nt.hrv_t,
-                &nt.motion_t,
-                nt.start_ds,
-                nt.end_ds,
-            );
-        }
+        let full_stages = raw_stages.clone();
         let valid_stage_count = full_stages.iter().filter(|c| (1..=4).contains(*c)).count();
         let (deep_pct_val, light_pct_val, rem_pct_val, wake_pct_val) = if valid_stage_count > 0
             && full_stages.contains(&1)
@@ -2621,7 +2037,7 @@ pub fn build_summary(
         let wake_ymd = Some(ymd_label(end_unix, tz));
         // The official app's main hypnogram: the 30 s stages folded into 5-minute
         // blocks (Android `SleepPhaseConverter.aggregate30SecTo5Min`).
-        let stages_5min = (oura_stages && !full_stages.is_empty())
+        let stages_5min = (!full_stages.is_empty())
             .then(|| aggregate_30s_to_5min(&full_stages));
         // Wall-clock start (unix s) of stages_full[0] when the stager reports it: NSSA
         // epochs sit on the 30 s grid floor30(bedtime start), not on start_ds.
@@ -2749,19 +2165,17 @@ pub fn build_summary(
         None => Value::Null,
     };
 
-    let mut activity = activity_raw
+    let activity = activity_raw
         .as_ref()
         .and_then(|v| v["sessions"].as_array().cloned())
         .unwrap_or_default();
 
     let mut prof_sum: std::collections::BTreeMap<String, [f64; 96]> = Default::default();
     let mut prof_cnt: std::collections::BTreeMap<String, [u32; 96]> = Default::default();
-    let mut daily: std::collections::BTreeMap<String, (f64, f64)> = Default::default();
-    // The same active kcal and steps per 15-minute slot, so exports can place them
-    // in time instead of as one midnight-to-midnight block.
+    let mut daily: std::collections::BTreeMap<String, f64> = Default::default();
+    // The same active kcal per 15-minute slot, so exports can place it in time
+    // instead of as one midnight-to-midnight block.
     let mut slot_kcal: std::collections::BTreeMap<String, [f64; 96]> = Default::default();
-    let mut slot_steps: std::collections::BTreeMap<String, [f64; 96]> = Default::default();
-    let mut met_min: std::collections::BTreeMap<i64, f64> = Default::default();
     let weight = demo.weight_kg;
     // Resting daily expenditure via ecore's Schofield BMR (by age band + sex), instead
     // of the old flat `weight × 24` approximation. Added to active kcal for total kcal.
@@ -2771,9 +2185,6 @@ pub fn build_summary(
         _ => 2, // unknown → the male/female average (bmr_schofield's fallback)
     };
     let bmr_kcal_day = oura_analysis::ported::metabolic::bmr_schofield(demo.age, sex_code, weight);
-    // Anthropometric VO2max (Jackson non-exercise estimate), ecore's own formula.
-    let vo2max =
-        oura_analysis::ported::metabolic::vo2max_jackson(demo.age, demo.sex == 'F', weight);
     for (ds, tag, jstr, cu) in &events {
         if name_of(*tag) != "activity_information" || !jstr.contains("\"met\"") {
             continue;
@@ -2795,63 +2206,28 @@ pub fn build_summary(
                         .clamp(0.0, 95.0) as usize;
                     prof_sum.entry(key.clone()).or_insert([0.0; 96])[bucket] += (mv - 1.0).max(0.0);
                     prof_cnt.entry(key.clone()).or_insert([0; 96])[bucket] += 1;
-                    let step_rate = if mv >= 7.0 {
-                        150.0
-                    } else if mv >= 2.5 {
-                        105.0
-                    } else {
-                        0.0
-                    };
                     let kcal = (mv - 1.0).max(0.0) * weight / 60.0;
                     slot_kcal.entry(key.clone()).or_insert([0.0; 96])[bucket] += kcal;
-                    slot_steps.entry(key.clone()).or_insert([0.0; 96])[bucket] += step_rate;
-                    let e = daily.entry(key).or_insert((0.0, 0.0));
-                    e.0 += kcal;
-                    e.1 += step_rate;
-                    *met_min.entry((local / 60.0).floor() as i64).or_insert(0.0) +=
-                        (mv - 1.0).max(0.0);
+                    *daily.entry(key).or_insert(0.0) += kcal;
                 }
             }
         }
     }
-    for sess in activity.iter_mut() {
-        let (Some(start), Some(dur)) = (sess["start"].as_str(), sess["duration_min"].as_f64())
-        else {
-            continue;
-        };
-        let parse = || -> Option<i64> {
-            let (date, time) = start.split_once(' ')?;
-            let mut dp = date.split('-');
-            let y: i64 = dp.next()?.parse().ok()?;
-            let mo: u32 = dp.next()?.parse().ok()?;
-            let dd: u32 = dp.next()?.parse().ok()?;
-            let mut tp = time.split(':');
-            let hh: i64 = tp.next()?.parse().ok()?;
-            let mm: i64 = tp.next()?.parse().ok()?;
-            Some(days_from_civil(y, mo, dd) * 1440 + hh * 60 + mm)
-        };
-        if let Some(m0) = parse() {
-            let kcal: f64 = (m0..m0 + dur as i64)
-                .filter_map(|m| met_min.get(&m))
-                .map(|met| met * weight / 60.0)
-                .sum();
-            sess["active_kcal"] = json!(kcal.round());
-        }
-    }
+    // A workout's calories come from Oura's energy_expenditure model (`kcal`, set by
+    // the runner); none are guessed from MET when it didn't run.
 
     let activity_daily: Value = daily
         .iter()
-        .map(|(k, (act, steps))| {
-            let steps_r = (steps / 100.0).round() * 100.0;
-            // walking distance from steps via ecore's actinfo_steps_to_meters (0.762 m/step)
-            let distance_m = oura_analysis::ported::metabolic::steps_to_meters(steps_r as u32);
+        .map(|(k, act)| {
+            // Steps (and the distance ecore derives from them) come only from Oura's
+            // step_counter model, which the clients run; MET minutes are not steps.
             (
                 k.clone(),
                 json!({
                     "active_kcal": act.round(),
                     "total_kcal": (bmr_kcal_day + act).round(),
-                    "steps": steps_r,
-                    "distance_m": distance_m,
+                    "steps": Value::Null,
+                    "distance_m": Value::Null,
                 }),
             )
         })
@@ -2885,7 +2261,8 @@ pub fn build_summary(
                 k.clone(),
                 json!({
                     "active_kcal": round1(kcal),
-                    "steps": round1(&slot_steps[k]),
+                    // filled per slot by Oura's step_counter where a client runs it
+                    "steps": vec![0.0; 96],
                     // minutes the ring reported in each slot (0 = not worn / no data)
                     "minutes": prof_cnt[k].to_vec(),
                     "basal_kcal_per_min": ((bmr_kcal_day / 1440.0) * 1000.0).round() / 1000.0,
@@ -3165,7 +2542,9 @@ pub fn build_summary(
         "illness": illness,
         "stress": stress,
         "cardio": cva,
-        "fitness": { "vo2max": (vo2max * 10.0).round() / 10.0 },
+        // No VO2 max: the only source was a formula over age, sex and weight (Jackson
+        // non-exercise), not a measurement, and none of Oura's models outputs one.
+        "fitness": { "vo2max": Value::Null },
         "activity": activity,
         "activity_profile": activity_profile,
         "activity_slots": activity_slots,
@@ -3199,39 +2578,6 @@ mod tests {
         assert!(prefer_battery_reading(None, None));
         // An undated reading must never override a dated pick (the replay-safety case).
         assert!(!prefer_battery_reading(None, Some(100.0)));
-    }
-
-    #[test]
-    fn signal_staging_fills_a_resolved_night_with_5min_physiology() {
-        // Characterization of the fallback the web dashboard relies on when the model
-        // can't stage a night: a resolved 8.4 h window carrying HR/HRV/motion must come
-        // back as a full per-epoch hypnogram with some sleep, never blank. Reproduces
-        // the *shape* only (5-min-spaced samples, quiet but for a few movement bursts),
-        // not any real recording. (The estimator itself is exercised elsewhere; this
-        // pins "not blank", which is the behaviour the dashboard fix depends on.)
-        let start_ds = 0i64;
-        let end_ds = 302_400i64; // 8.4 h in deciseconds
-        let step = 3_000i64; // 5 min
-        let mut hr_t = Vec::new();
-        let mut hrv_t = Vec::new();
-        let mut motion_t = Vec::new();
-        for (i, ds) in (start_ds..=end_ds).step_by(step as usize).enumerate() {
-            // HR dips mid-night, HRV rises mid-night (a sleep-like autonomic profile).
-            let phase = (ds - start_ds) as f64 / (end_ds - start_ds) as f64;
-            hr_t.push((ds, 56.0 - 10.0 * (phase * std::f64::consts::PI).sin()));
-            hrv_t.push((ds, 45.0 + 30.0 * (phase * std::f64::consts::PI).sin()));
-            let mo = if i % 37 == 0 { 9.0 } else { 1.0 }; // mostly still, brief arousals
-            motion_t.push((ds, mo));
-        }
-        let stages = stage_night_from_signals(start_ds, end_ds, &hr_t, &hrv_t, &motion_t);
-        // One cell per 30 s epoch across the whole window — the night is not blank.
-        assert_eq!(stages.len(), ((end_ds - start_ds) / 300) as usize);
-        // And some of it is scored as sleep rather than all wake (the reported bug left
-        // the night with no sleep at all). Which sleep stage is the estimator's call.
-        assert!(
-            stages.iter().any(|&c| (1..=3).contains(&c)),
-            "a quiet low-HR night must score at least some sleep, not all wake"
-        );
     }
 
     #[test]
@@ -3385,11 +2731,9 @@ mod tests {
         assert!(stages[..480].iter().all(|&c| c == 0));
         assert!(stages[480..].iter().all(|&c| c == 2));
         assert!(hyp[0].1["efficiency_pct"].is_null());
-        let smoothed = smooth_stages(&stages, 5);
-        assert!(smoothed[..480].iter().all(|&c| c == 0));
-        let compact = downsample_codes(&smoothed, 120);
+        let compact = downsample_codes(&stages, 120);
         assert!(compact[..60].iter().all(|&c| c == 0));
-        assert_eq!(sleep_metrics(&smoothed, 8.0 * 3600.0), (Value::Null, 0));
+        assert_eq!(sleep_metrics(&stages, 8.0 * 3600.0), (Value::Null, 0));
     }
 
     #[test]
@@ -3890,7 +3234,7 @@ mod tests {
                             "rem_pct": 25.0,
                             "wake_pct": 0.0,
                             "efficiency_pct": 95.0,
-                            "source": "model",
+                            "source": "nssa",
                         })
                     })
                     .collect();
@@ -4012,83 +3356,6 @@ mod tests {
     }
 
     #[test]
-    fn refine_deep_stages_recovers_n3_bouts_from_zero_deep_gen4_hypnogram() {
-        // Simulate an 8-hour night (960 x 30s epochs) where SleepNet produced only
-        // Wake (4), REM (3), and Light (2) with 0% Deep (1) due to missing PPG amplitude.
-        let start_ds = 10_000i64;
-        let end_ds = start_ds + 960 * 300;
-        let mut stages = vec![2i64; 960];
-        for s in stages.iter_mut().take(30) {
-            *s = 4;
-        }
-        for s in stages.iter_mut().skip(700).take(60) {
-            *s = 3;
-        }
-        // Build 5-minute HR/HRV samples: quiet low-HR N3 bouts in the first half of the night
-        let mut hr_t = Vec::new();
-        let mut hrv_t = Vec::new();
-        let mut motion_t = Vec::new();
-        for i in 0..96 {
-            let ds = start_ds + i * 3_000;
-            let in_n3_bout = (8..22).contains(&i) || (30..40).contains(&i);
-            let hr = if in_n3_bout { 51.0 } else { 58.0 };
-            let hrv = if in_n3_bout { 46.0 } else { 36.0 };
-            hr_t.push((ds, hr));
-            hrv_t.push((ds, hrv));
-        }
-        for e in 0..960 {
-            let ds = start_ds + e * 300;
-            let m = if e < 30 { 8.0 } else { 0.0 };
-            motion_t.push((ds, m));
-        }
-
-        let refined = refine_deep_stages(&stages, &hr_t, &motion_t, start_ds, end_ds);
-        let deep_epochs = refined.iter().filter(|&&c| c == 1).count();
-        let deep_pct = (deep_epochs as f64 / refined.len() as f64) * 100.0;
-        assert!(
-            (10.0..=28.0).contains(&deep_pct),
-            "expected physiological N3 deep sleep recovery (10-28%), got {deep_pct:.1}% ({deep_epochs} epochs)"
-        );
-        // REM and Wake epochs must remain untouched.
-        assert_eq!(refined[0], 4);
-        assert_eq!(refined[720], 3);
-    }
-
-    #[test]
-    fn stage_night_from_signals_produces_complete_four_stage_hypnogram() {
-        let start_ds = 100_000i64;
-        let end_ds = start_ds + 800 * 300;
-        let mut hr_t = Vec::new();
-        let mut hrv_t = Vec::new();
-        let mut motion_t = Vec::new();
-        for i in 0..80 {
-            let ds = start_ds + i * 3_000;
-            let hr = if i < 4 {
-                68.0
-            } else if (6..20).contains(&i) {
-                50.0
-            } else if (55..68).contains(&i) {
-                61.0
-            } else {
-                56.0
-            };
-            let hrv = if (55..68).contains(&i) { 26.0 } else { 42.0 };
-            hr_t.push((ds, hr));
-            hrv_t.push((ds, hrv));
-        }
-        for e in 0..800 {
-            let ds = start_ds + e * 300;
-            let m = if e < 20 || e > 785 { 9.0 } else { 0.0 };
-            motion_t.push((ds, m));
-        }
-        let stages = stage_night_from_signals(start_ds, end_ds, &hr_t, &hrv_t, &motion_t);
-        assert_eq!(stages.len(), 800);
-        assert!(stages.contains(&1));
-        assert!(stages.contains(&2));
-        assert!(stages.contains(&4));
-    }
-
-    #[test]
     fn activity_slots_place_steps_and_kcal_in_the_minutes_they_happened() {
         let dir = std::env::temp_dir().join(format!(
             "oura-activity-slots-test-{}-{}",
@@ -4125,12 +3392,16 @@ mod tests {
         let steps: Vec<f64> = day["steps"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
         let minutes: Vec<u64> = day["minutes"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap()).collect();
         assert_eq!(steps.len(), 96);
+        // MET minutes are not steps: only Oura's step_counter (run by the clients) fills them.
+        assert!(steps.iter().all(|&s| s == 0.0));
+        assert!(sum["activity_daily"]["2026-05-28"]["steps"].is_null());
+        assert!(sum["activity_daily"]["2026-05-28"]["distance_m"].is_null());
         // 14:00 is slot 56; nothing lands at midnight.
-        assert_eq!(steps[56], 255.0);
         assert_eq!(minutes[56], 4);
-        assert_eq!(steps.iter().sum::<f64>(), 255.0);
         assert_eq!(minutes.iter().sum::<u64>(), 4);
-        let kcal: f64 = day["active_kcal"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).sum();
+        let slots: Vec<f64> = day["active_kcal"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+        assert!(slots[56] > 0.0 && slots[..56].iter().all(|&k| k == 0.0));
+        let kcal: f64 = slots.iter().sum();
         let daily = sum["activity_daily"]["2026-05-28"]["active_kcal"].as_f64().unwrap();
         assert!((kcal - daily).abs() <= 1.0, "slots {kcal} vs daily {daily}");
 
@@ -4249,75 +3520,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn gen4_early_cycle_n3_latency_beats_late_circadian_hr_drop_and_rem_hrv_surges() {
-        // Reproduces the 2026-10-05 Gen 4 physiological profile:
-        // - Bedtime 23:10..07:20 (490 min = 980 epochs of 30s)
-        // - Sleep onset ~23:25 (epoch 30)
-        // - Cycle 1 N3 at 23:33..00:01 (epochs 46..102): HR drops locally from 64 -> 58 bpm,
-        //   HRV steady ~33 ms, motion 0 (even though late-night baseline HR is lower at 51 bpm).
-        // - Cycle 2 N3 at 01:08..01:19 (epochs 236..258): HR drops locally from 58 -> 51 bpm,
-        //   HRV ~29 ms, motion 0.
-        // - Late-night REM at 03:55..04:20 (epochs 570..620): HR is low (51 bpm) due to circadian
-        //   minimum, accompanied by a large phasic REM HRV surge (58..61 ms) and brief twitches.
-        let start_ds = 100_000i64;
-        let epochs = 980usize;
-        let end_ds = start_ds + (epochs as i64) * 300;
-        let mut hr_t = Vec::new();
-        let mut hrv_t = Vec::new();
-        for i in 0..98 {
-            let ds = start_ds + (i as i64) * 3_000;
-            // Circadian drift from 63 bpm early night down to 53 bpm late night
-            let circadian_base = 63.0 - 10.0 * (i as f64 / 97.0);
-            let (hr, hrv) = if i < 3 {
-                (67.0, 25.0)
-            } else if (4..=10).contains(&i) {
-                // 1st cycle N3 dip (~58 bpm vs 62 bpm local baseline, steady HRV)
-                (58.0, 33.0)
-            } else if (23..=26).contains(&i) {
-                // 2nd cycle N3 dip (~51 bpm vs 58 bpm local baseline, steady HRV)
-                (51.0, 29.0)
-            } else if (57..=62).contains(&i) {
-                // Late-night REM: low HR (51.5 bpm) + massive REM HRV surge (60 ms)
-                (51.5, 60.0)
-            } else {
-                (circadian_base, 31.0)
-            };
-            hr_t.push((ds, hr));
-            hrv_t.push((ds, hrv));
-        }
-        let mut motion_t = Vec::new();
-        for e in 0..epochs {
-            let ds = start_ds + (e as i64) * 300;
-            let m = if e < 28 || e >= 972 {
-                12.0
-            } else if e == 585 || e == 605 {
-                3.0
-            } else {
-                0.0
-            };
-            motion_t.push((ds, m));
-        }
-
-        let staged = stage_night_from_signals(start_ds, end_ds, &hr_t, &hrv_t, &motion_t);
-        assert_eq!(staged.len(), epochs);
-        let first_deep = staged
-            .iter()
-            .position(|&c| c == 1)
-            .expect("must detect N3 deep sleep");
-        assert!(
-            (40..=70).contains(&first_deep),
-            "first N3 bout must occur in 1st sleep cycle (~23:33, epochs 40..70), got epoch {first_deep}"
-        );
-        let cycle1_deep = staged[44..105].iter().filter(|&&c| c == 1).count();
-        assert!(
-            cycle1_deep >= 30,
-            "expected >=15 min (30 epochs) of N3 in 1st sleep cycle, got {cycle1_deep} epochs"
-        );
-        let late_rem_false_deep = staged[570..620].iter().filter(|&&c| c == 1).count();
-        assert_eq!(
-            late_rem_false_deep, 0,
-            "late-night REM HRV surge (epochs 570..620) must not be misclassified as N3 deep sleep"
-        );
-    }
 }

@@ -33,6 +33,14 @@ metric there once and both clients receive it in the JSON.
   **and** an `oura_*` function in `TorchBridge.mm` + a Swift `*Model.swift` that builds the
   same input tensors and folds the result into the summary.
 
+## No estimates in place of Oura's models
+
+Values come from the ring, from Oura's models, or from ecore ports; nothing is guessed
+when a model can't run. A night Oura's sleepstaging model (or the ring) didn't stage has
+no stages (Health gets only In Bed), steps come only from `step_counter`, workout
+calories only from `energy_expenditure`, and there is no VO2 max (the old one was a
+formula over age, sex and weight). If no model covers a value, leave it out.
+
 ## Feature ↔ feature correspondence
 
 | Feature | Web (`app.js`) | iOS (`OuraApp.swift`) | Data (JSON key) | Model |
@@ -213,6 +221,9 @@ has no `illness`) and the ring-clock warnings (`clock.warnings`). Still iOS-only
   systems, ring RMSSD remains visible in the app rather than being mislabeled as
   SDNN. Reconciliation removes only this exporter's legacy `openoura.hrv.*` SDNN
   records, using existing authorization; it requests no new SDNN access.
+- **Step counts**: Oura's `step_counter` runs only on iOS (`StepCounter.swift`). The
+  shared core no longer turns MET minutes into steps, so the web shows no steps or
+  distance until a `tools/run_step_counter.py` twin feeds `activity_slots.steps`.
 - **Sleep score + breathing rate** (`nights[].sleep_score`, `breath_rate`).
 - **Skin temperature / latest HR vitals and trend pages**, **hourly heart rate**
   (`hourly_hr` is FFI-only; no `/api` endpoint yet).
@@ -231,11 +242,6 @@ has no `illness`) and the ring-clock warnings (`clock.warnings`). Still iOS-only
   (`hr_bins`, with a 15 min / 1 h switch); iOS `HeartRate.swift` still shows hourly bars.
 - **Live heart rate** panel: `POST /api/live-hr` streams beats from `oura live-hr`
   (one minute per session, stoppable) as newline-delimited JSON.
-- **"Signal estimate" staging notice**: when a night is staged by the Rust signal
-  fallback (`staging_source === "signals"`, i.e. Python/torch or the `.pt` model is
-  absent on this machine), the web day view shows a note saying so and how to enable
-  Oura's model. iOS bundles the on-device model, so this condition is rare there and
-  has no matching label yet.
 
 - **Advanced & debugging**: on-ring feature toggles (`/api/feature`) and the per-type
   event stream. Profile editing is now native on iOS, including optional Apple Health
