@@ -173,7 +173,7 @@ struct StatusView: View {
         } header: {
             Text("WHOOP")
         } footer: {
-            Text("Uses the pairing the WHOOP app made with this iPhone, so don't Forget the strap in Bluetooth settings. The strap stores about two weeks, so a run without your phone arrives the next time it's in range. Heart rate, HRV and resting heart rate go to Health when the switch below is on.")
+            Text("Uses the pairing the WHOOP app made with this iPhone, so don't Forget the strap in Bluetooth settings. The strap stores about two weeks, so a run without your phone arrives the next time it's in range. Heart rate, HRV and beat-to-beat data go to Health when the switch below is on; while you also wear the ring, it covers your nights and WHOOP covers the day.")
         }
     }
 

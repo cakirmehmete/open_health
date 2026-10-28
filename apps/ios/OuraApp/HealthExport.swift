@@ -762,7 +762,7 @@ final class HealthExport: ObservableObject {
         return (start, end)
     }
 
-    private static func nightInterval(_ n: NightRow) -> (Date, Date)? {
+    static func nightInterval(_ n: NightRow) -> (Date, Date)? {
         guard let ymd = n.ymd, let startHM = n.start, let endHM = n.end else { return nil }
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")

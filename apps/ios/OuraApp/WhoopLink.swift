@@ -88,6 +88,9 @@ final class WhoopLink: NSObject, ObservableObject, CBCentralManagerDelegate, CBP
     }
 
     /// "Connect WHOOP": adopt the strap the WHOOP app paired, or find it by scanning.
+    /// Whether a strap has been connected; background scheduling keys off it too.
+    static var isSetUp: Bool { UserDefaults.standard.string(forKey: peripheralKey) != nil }
+
     func connectNew() {
         WhoopHealth.shared.authorize()
         queue.async { [self] in
@@ -366,6 +369,7 @@ final class WhoopLink: NSObject, ObservableObject, CBCentralManagerDelegate, CBP
                 return
             }
             passSeconds += chunk.count
+            if let oldest = chunk.map(\.unix).min() { WhoopHealth.shared.noteArrival(oldest: oldest) }
             if let temp = chunk.last(where: { $0.skinTempCenti > 0 })?.skinTempCenti {
                 ui { self.skinTemp = Double(temp) / 100 }
             }

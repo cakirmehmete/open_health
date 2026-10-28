@@ -1,8 +1,14 @@
 import Foundation
 import HealthKit
 
-/// Writes WHOOP-derived heart rate (per minute), HRV (one reading an hour) and
-/// resting heart rate (per day) to Apple Health, from the seconds in WhoopStore.
+/// Writes WHOOP-derived heart rate (per minute), HRV (one reading an hour, with its
+/// beats) and resting heart rate (per day) to Apple Health, from WhoopStore.
+///
+/// Both devices write from this one app, so Health and Bevel can't rank them by
+/// source. While the ring is in use (synced in the last 36 h) it owns the nights:
+/// WHOOP skips the ring's sleep windows, writes no resting heart rate, and waits
+/// for the ring's next sync before writing a stretch, so the night is known by
+/// then. Without the ring, WHOOP covers the whole day.
 ///
 /// Kept apart from HealthExport, which rebuilds and reconciles the ring's samples
 /// from a summary: WHOOP samples are append-only, carry `openwhoop.` sync
@@ -82,8 +88,10 @@ final class WhoopHealth: ObservableObject, @unchecked Sendable {
         let calendar = Calendar.current
         var rhrMark = max(UInt32(defaults.integer(forKey: Key.rhr)),
                           UInt32(calendar.startOfDay(for: date(floor)).timeIntervalSince1970))
-        let hrEnd = settled - settled % 60
-        let hrvEnd = settled - settled % 3600
+        let ring = Self.ringCoverage()
+        let cap = ring.map { min(settled, $0.through) } ?? settled
+        let hrEnd = cap - cap % 60
+        let hrvEnd = cap - cap % 3600
         guard hrMark < hrEnd || hrvMark < hrvEnd || rhrMark + 86_400 <= settled else { return true }
 
         // Authorization is decided in the foreground; here just respect it.
@@ -107,7 +115,9 @@ final class WhoopHealth: ObservableObject, @unchecked Sendable {
         while UInt32(day.timeIntervalSince1970) < settled {
             guard let next = calendar.date(byAdding: .day, value: 1, to: day) else { break }
             let start = UInt32(day.timeIntervalSince1970), end = UInt32(next.timeIntervalSince1970)
-            let seconds = WhoopStore.shared.samples(from: start, to: min(end, settled))
+            let seconds = WhoopStore.shared.samples(from: start, to: min(end, settled)).filter { s in
+                !(ring?.nights.contains { s.unix >= $0.0 && s.unix < $0.1 } ?? false)
+            }
             var objects: [HKObject] = []
             let minutes = WhoopMetrics.minutes(seconds)
 
@@ -140,7 +150,7 @@ final class WhoopHealth: ObservableObject, @unchecked Sendable {
                 }
             }
             let dayComplete = end <= settled
-            if dayComplete, start >= rhrMark, let rhr = type(.restingHeartRate),
+            if dayComplete, ring == nil, start >= rhrMark, let rhr = type(.restingHeartRate),
                let value = WhoopMetrics.restingHeartRate(minutes) {
                 objects.append(HKQuantitySample(type: rhr, quantity: HKQuantity(unit: bpmUnit, doubleValue: value),
                                                 start: day, end: next, device: device, metadata: meta("rhr.\(start)")))
@@ -210,6 +220,30 @@ final class WhoopHealth: ObservableObject, @unchecked Sendable {
         }
         group.wait()
         return failure
+    }
+
+    /// The ring's sleep windows and how far its data reaches, while it's in use.
+    static func ringCoverage(now: Date = Date()) -> (through: UInt32, nights: [(UInt32, UInt32)])? {
+        let last = UserDefaults.standard.double(forKey: "ring.last-successful-sync-at")
+        guard last > 0, now.timeIntervalSince1970 - last < 36 * 3600 else { return nil }
+        let nights = HealthExport.distinctNights(SummaryCache.load()?.nights ?? [])
+            .compactMap(HealthExport.nightInterval)
+            .map { (UInt32($0.0.timeIntervalSince1970), UInt32($0.1.timeIntervalSince1970)) }
+        return (UInt32(last), nights)
+    }
+
+    /// History that arrives for time already exported (a drain cut short, then
+    /// resumed from an older cursor) pulls the watermarks back so it isn't skipped.
+    /// Re-saving the overlap is harmless: sync identifiers make Health ignore it.
+    func noteArrival(oldest: UInt32) {
+        queue.async {
+            let defaults = UserDefaults.standard
+            let day = UInt32(Calendar.current.startOfDay(for: self.date(oldest)).timeIntervalSince1970)
+            for (key, mark) in [(Key.hr, oldest - oldest % 60), (Key.hrv, oldest - oldest % 3600), (Key.rhr, day)]
+            where defaults.integer(forKey: key) > Int(mark) {
+                defaults.set(Int(mark), forKey: key)
+            }
+        }
     }
 
     private func save(_ objects: [HKObject]) -> Error? {

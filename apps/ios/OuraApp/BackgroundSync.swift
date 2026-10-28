@@ -35,7 +35,7 @@ enum BackgroundSync {
     }
 
     static func schedule() {
-        guard Keychain.loadKey() != nil else { return }
+        guard Keychain.loadKey() != nil || WhoopLink.isSetUp else { return }
         let refresh = BGAppRefreshTaskRequest(identifier: refreshID)
         refresh.earliestBeginDate = Date(timeIntervalSinceNow: interval)
         let processing = BGProcessingTaskRequest(identifier: processingID)
