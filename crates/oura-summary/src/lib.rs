@@ -2757,6 +2757,10 @@ pub fn build_summary(
     let mut prof_sum: std::collections::BTreeMap<String, [f64; 96]> = Default::default();
     let mut prof_cnt: std::collections::BTreeMap<String, [u32; 96]> = Default::default();
     let mut daily: std::collections::BTreeMap<String, (f64, f64)> = Default::default();
+    // The same active kcal and steps per 15-minute slot, so exports can place them
+    // in time instead of as one midnight-to-midnight block.
+    let mut slot_kcal: std::collections::BTreeMap<String, [f64; 96]> = Default::default();
+    let mut slot_steps: std::collections::BTreeMap<String, [f64; 96]> = Default::default();
     let mut met_min: std::collections::BTreeMap<i64, f64> = Default::default();
     let weight = demo.weight_kg;
     // Resting daily expenditure via ecore's Schofield BMR (by age band + sex), instead
@@ -2798,8 +2802,11 @@ pub fn build_summary(
                     } else {
                         0.0
                     };
+                    let kcal = (mv - 1.0).max(0.0) * weight / 60.0;
+                    slot_kcal.entry(key.clone()).or_insert([0.0; 96])[bucket] += kcal;
+                    slot_steps.entry(key.clone()).or_insert([0.0; 96])[bucket] += step_rate;
                     let e = daily.entry(key).or_insert((0.0, 0.0));
-                    e.0 += (mv - 1.0).max(0.0) * weight / 60.0;
+                    e.0 += kcal;
                     e.1 += step_rate;
                     *met_min.entry((local / 60.0).floor() as i64).or_insert(0.0) +=
                         (mv - 1.0).max(0.0);
@@ -2866,6 +2873,24 @@ pub fn build_summary(
                 })
                 .collect();
             (k.clone(), json!(arr))
+        })
+        .collect::<serde_json::Map<_, _>>()
+        .into();
+
+    let round1 = |xs: &[f64; 96]| xs.iter().map(|x| (x * 10.0).round() / 10.0).collect::<Vec<f64>>();
+    let activity_slots: Value = slot_kcal
+        .iter()
+        .map(|(k, kcal)| {
+            (
+                k.clone(),
+                json!({
+                    "active_kcal": round1(kcal),
+                    "steps": round1(&slot_steps[k]),
+                    // minutes the ring reported in each slot (0 = not worn / no data)
+                    "minutes": prof_cnt[k].to_vec(),
+                    "basal_kcal_per_min": ((bmr_kcal_day / 1440.0) * 1000.0).round() / 1000.0,
+                }),
+            )
         })
         .collect::<serde_json::Map<_, _>>()
         .into();
@@ -3143,6 +3168,7 @@ pub fn build_summary(
         "fitness": { "vo2max": (vo2max * 10.0).round() / 10.0 },
         "activity": activity,
         "activity_profile": activity_profile,
+        "activity_slots": activity_slots,
         "activity_daily": activity_daily,
         "vitals": {
             "hrv": trend(&hrv_stat),
@@ -4060,6 +4086,55 @@ mod tests {
         assert!(stages.contains(&1));
         assert!(stages.contains(&2));
         assert!(stages.contains(&4));
+    }
+
+    #[test]
+    fn activity_slots_place_steps_and_kcal_in_the_minutes_they_happened() {
+        let dir = std::env::temp_dir().join(format!(
+            "oura-activity-slots-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("oura.db");
+        drop(Store::open(&db).unwrap());
+
+        // 2026-05-28 00:00:00 UTC; the activity packet starts at 14:00.
+        let midnight = 1_779_926_400i64;
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+             VALUES ('S1', 66, 'time_sync', 1000, X'00000000', ?1, ?2)",
+            rusqlite::params![format!("{{\"unix_time\":{midnight}}}"), midnight],
+        )
+        .unwrap();
+        let start_ds = 1000 + 14 * 36_000;
+        conn.execute(
+            "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+             VALUES ('S1', 80, 'activity_information', ?1, X'01', '{\"met\":[1.0,3.0,8.0,1.5]}', ?2)",
+            rusqlite::params![start_ds, midnight + 15 * 3600],
+        )
+        .unwrap();
+        drop(conn);
+
+        let sum = build_summary(&db, 0.0, &NoModelRunner).unwrap();
+        let day = &sum["activity_slots"]["2026-05-28"];
+        let steps: Vec<f64> = day["steps"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+        let minutes: Vec<u64> = day["minutes"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap()).collect();
+        assert_eq!(steps.len(), 96);
+        // 14:00 is slot 56; nothing lands at midnight.
+        assert_eq!(steps[56], 255.0);
+        assert_eq!(minutes[56], 4);
+        assert_eq!(steps.iter().sum::<f64>(), 255.0);
+        assert_eq!(minutes.iter().sum::<u64>(), 4);
+        let kcal: f64 = day["active_kcal"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).sum();
+        let daily = sum["activity_daily"]["2026-05-28"]["active_kcal"].as_f64().unwrap();
+        assert!((kcal - daily).abs() <= 1.0, "slots {kcal} vs daily {daily}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

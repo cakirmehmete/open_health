@@ -341,7 +341,8 @@ final class HealthExport: ObservableObject {
         let nights = Self.distinctNights(s.nights)
         for night in nights { out.append(contentsOf: sleepSamples(night)) }
         for night in nights { out.append(contentsOf: Self.heartSamples(night, canShare: canShare)) }
-        out.append(contentsOf: dailySamples(s.activity_daily, workoutMetKcal: Self.workoutMetKcal(s)))
+        out.append(contentsOf: dailySamples(s.activity_daily, slots: s.activity_slots,
+                                            workoutMetKcal: Self.workoutMetKcal(s)))
         out.append(contentsOf: daytimeHeartSamples(nights: s.nights))
         out.append(contentsOf: fitnessSamples(s.fitness))
         return out
@@ -371,10 +372,13 @@ final class HealthExport: ObservableObject {
     private func fitnessSamples(_ fitness: Fitness?) -> [HKObject] {
         guard let type = HKObjectType.quantityType(forIdentifier: .vo2Max), canShare(type),
               let vo2 = fitness?.vo2max, vo2 > 10, vo2 < 90 else { return [] }
+        // Timestamped when first estimated today, not at midnight; the sync id stays
+        // per-day, so later exports the same day keep this sample.
         let day = Calendar.current.startOfDay(for: Date())
+        let at = Date()
         let unit = HKUnit(from: "ml/kg*min")
         return [HKQuantitySample(type: type, quantity: HKQuantity(unit: unit, doubleValue: vo2),
-                                 start: day, end: day,
+                                 start: at, end: at,
                                  metadata: Self.meta("vo2.\(Int(day.timeIntervalSince1970)).\(Int((vo2 * 10).rounded()))"))]
     }
 
@@ -403,9 +407,9 @@ final class HealthExport: ObservableObject {
     /// The MET estimate for each local day's model-scored workout minutes (the part
     /// of that day's Active Energy the workouts now carry themselves), from the same
     /// 15-min MET-above-rest profile as the daily figure: kcal = MET x kg x hours.
-    static func workoutMetKcal(_ s: Summary) -> [String: Double] {
+    static func workoutMetKcal(_ s: Summary) -> [String: [Double]] {
         let weight = s.profile?.weight_kg ?? 75
-        var out: [String: Double] = [:]
+        var out: [String: [Double]] = [:]
         for w in s.workouts where w.isWorkout >= 0.5 && w.kcal != nil {
             guard let (start, end) = workoutDates(w) else { continue }
             var t = start
@@ -414,8 +418,9 @@ final class HealthExport: ObservableObject {
                 let key = Self.ymd(day)
                 let bucket = Int(t.timeIntervalSince(day) / 900)
                 let bucketEnd = min(end, day.addingTimeInterval(Double(bucket + 1) * 900))
-                if let profile = s.activity_profile[key], bucket < profile.count {
-                    out[key, default: 0] += max(0, profile[bucket]) * weight * bucketEnd.timeIntervalSince(t) / 3600
+                if let profile = s.activity_profile[key], bucket < profile.count, bucket < 96 {
+                    out[key, default: Array(repeating: 0, count: 96)][bucket] +=
+                        max(0, profile[bucket]) * weight * bucketEnd.timeIntervalSince(t) / 3600
                 }
                 t = bucketEnd
             }
@@ -733,39 +738,68 @@ final class HealthExport: ObservableObject {
         return out
     }
 
-    private func dailySamples(_ daily: [String: DailyStat], workoutMetKcal: [String: Double] = [:]) -> [HKObject] {
+    private func dailySamples(_ daily: [String: DailyStat], slots: [String: ActivitySlots],
+                              workoutMetKcal: [String: [Double]] = [:]) -> [HKObject] {
+        Self.activitySamples(daily: daily, slots: slots, workoutMetKcal: workoutMetKcal, canShare: canShare)
+    }
+
+    /// Steps, active/basal energy and distance, placed in the 15-minute slots they
+    /// happened in. Health readers chart samples at their start time, so a single
+    /// midnight-to-midnight total showed the whole day at 12 am. Days without slot
+    /// data (an older core) still get the daily total.
+    /// `workoutMetKcal` (per day, per slot) is the MET energy of model-scored workout
+    /// minutes; those workouts carry their own calories, so Active Energy leaves it out.
+    static func activitySamples(daily: [String: DailyStat], slots: [String: ActivitySlots],
+                                workoutMetKcal: [String: [Double]] = [:],
+                                canShare: (HKSampleType) -> Bool, now: Date = Date()) -> [HKObject] {
         var out: [HKObject] = []
         let cal = Calendar.current
         let dayFmt = DateFormatter()
         dayFmt.calendar = cal
         dayFmt.locale = Locale(identifier: "en_US_POSIX")
+        dayFmt.timeZone = .current
         dayFmt.dateFormat = "yyyy-MM-dd"
+        let steps = HKObjectType.quantityType(forIdentifier: .stepCount).flatMap { canShare($0) ? $0 : nil }
+        let active = HKObjectType.quantityType(forIdentifier: .activeEnergyBurned).flatMap { canShare($0) ? $0 : nil }
+        let basal = HKObjectType.quantityType(forIdentifier: .basalEnergyBurned).flatMap { canShare($0) ? $0 : nil }
+        let distance = HKObjectType.quantityType(forIdentifier: .distanceWalkingRunning).flatMap { canShare($0) ? $0 : nil }
+        func add(_ type: HKQuantityType?, _ unit: HKUnit, _ value: Double, _ start: Date, _ end: Date, _ id: String) {
+            guard let type, value > 0 else { return }
+            out.append(HKQuantitySample(type: type, quantity: HKQuantity(unit: unit, doubleValue: value),
+                                        start: start, end: end, metadata: meta(id)))
+        }
         for (day, st) in daily {
             guard let start = dayFmt.date(from: day),
                   let end = cal.date(byAdding: .day, value: 1, to: start) else { continue }
-            if let type = HKObjectType.quantityType(forIdentifier: .stepCount), canShare(type),
-               let steps = st.steps, steps > 0 {
-                let q = HKQuantity(unit: .count(), doubleValue: steps)
-                out.append(HKQuantitySample(type: type, quantity: q, start: start, end: end,
-                                            metadata: Self.meta("steps.\(day).\(Int(steps.rounded()))")))
+            guard let slot = slots[day], slot.steps.count == 96, slot.active_kcal.count == 96,
+                  slot.minutes.count == 96 else {
+                add(steps, .count(), st.steps ?? 0, start, end, "steps.\(day).\(Int((st.steps ?? 0).rounded()))")
+                let trimmed = max(0, (st.active_kcal ?? 0) - (workoutMetKcal[day]?.reduce(0, +) ?? 0))
+                add(active, .kilocalorie(), trimmed, start, end, "kcal.\(day).\(Int(trimmed.rounded()))")
+                if let total = st.total_kcal, let act = st.active_kcal {
+                    add(basal, .kilocalorie(), total - act, start, end, "basal.\(day).\(Int((total - act).rounded()))")
+                }
+                add(distance, .meter(), st.distance_m ?? 0, start, end, "dist.\(day).\(Int((st.distance_m ?? 0).rounded()))")
+                continue
             }
-            if let type = HKObjectType.quantityType(forIdentifier: .activeEnergyBurned), canShare(type),
-               let total = st.active_kcal, case let kcal = max(0, total - (workoutMetKcal[day] ?? 0)), kcal > 0 {
-                let q = HKQuantity(unit: .kilocalorie(), doubleValue: kcal)
-                out.append(HKQuantitySample(type: type, quantity: q, start: start, end: end,
-                                            metadata: Self.meta("kcal.\(day).\(Int(kcal.rounded()))")))
-            }
-            if let type = HKObjectType.quantityType(forIdentifier: .basalEnergyBurned), canShare(type),
-               let total = st.total_kcal, let active = st.active_kcal, total > active {
-                let q = HKQuantity(unit: .kilocalorie(), doubleValue: total - active)
-                out.append(HKQuantitySample(type: type, quantity: q, start: start, end: end,
-                                            metadata: Self.meta("basal.\(day).\(Int((total - active).rounded()))")))
-            }
-            if let type = HKObjectType.quantityType(forIdentifier: .distanceWalkingRunning), canShare(type),
-               let metres = st.distance_m, metres > 0 {
-                let q = HKQuantity(unit: .meter(), doubleValue: metres)
-                out.append(HKQuantitySample(type: type, quantity: q, start: start, end: end,
-                                            metadata: Self.meta("dist.\(day).\(Int(metres.rounded()))")))
+            for i in 0..<96 where slot.minutes[i] > 0 {
+                // DST days are 23 or 25 h long; slots follow the wall clock like the core.
+                guard let a = cal.date(byAdding: .minute, value: i * 15, to: start),
+                      let b = cal.date(byAdding: .minute, value: (i + 1) * 15, to: start) else { continue }
+                // A slot still in progress ends now, not in the future.
+                let e = min(b, max(now, a.addingTimeInterval(1)))
+                let key = "\(day).\(i)"
+                let trims = workoutMetKcal[day]
+                let s = slot.steps[i]
+                let k = max(0, slot.active_kcal[i] - (trims.map { i < $0.count ? $0[i] : 0 } ?? 0))
+                add(steps, .count(), s, a, e, "steps15.\(key).\(Int(s.rounded()))")
+                add(active, .kilocalorie(), k, a, e, "kcal15.\(key).\(Int((k * 10).rounded()))")
+                // ecore's walking distance, 0.762 m per step, as in the daily total.
+                add(distance, .meter(), s * 0.762, a, e, "dist15.\(key).\(Int(s.rounded()))")
+                if let perMin = slot.basal_kcal_per_min {
+                    let kcal = perMin * Double(slot.minutes[i])
+                    add(basal, .kilocalorie(), kcal, a, e, "basal15.\(key).\(Int((kcal * 10).rounded()))")
+                }
             }
         }
         return out

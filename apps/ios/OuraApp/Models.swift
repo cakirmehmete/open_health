@@ -161,6 +161,13 @@ enum JSONValue: Codable {
 }
 
 struct DailyStat: Codable { var active_kcal: Double?; var total_kcal: Double?; var steps: Double?; var distance_m: Double? }
+/// One day's activity in 96 × 15-minute slots (local time), summing to `DailyStat`.
+struct ActivitySlots: Codable {
+    var active_kcal: [Double] = []
+    var steps: [Double] = []
+    var minutes: [Int] = []          // minutes the ring reported in each slot
+    var basal_kcal_per_min: Double?
+}
 struct Profile: Codable { var sex: String?; var age: Double?; var height_m: Double?; var weight_kg: Double?; var ring_size: Double? }
 // a detected activity session (on-device automatic_activity_detection)
 struct WorkoutSession: Identifiable, Codable {
@@ -358,6 +365,7 @@ struct Summary: Codable {
     var vitals = Vitals()
     var activity_profile: [String: [Double]] = [:]   // date → 96 × 15-min mean MET-above-rest
     var activity_daily: [String: DailyStat] = [:]     // date → steps / active-kcal / total-kcal
+    var activity_slots: [String: ActivitySlots] = [:] // date → the same, per 15 minutes
     var profile: Profile?
     var cardio: Cardio?
     var fitness: Fitness?
@@ -374,7 +382,7 @@ struct Summary: Codable {
     // out of decoding.
     enum CodingKeys: String, CodingKey {
         case analysis_digest, analysis_version
-        case digest, device, nights, clock, vitals, activity_profile, activity_daily, profile, cardio, fitness, error
+        case digest, device, nights, clock, vitals, activity_profile, activity_daily, activity_slots, profile, cardio, fitness, error
         case symptoms
         case sleepDebt = "sleep_debt"
     }
@@ -394,6 +402,7 @@ struct Summary: Codable {
         vitals = (try? c.decodeIfPresent(Vitals.self, forKey: .vitals)) ?? Vitals()
         activity_profile = (try? c.decodeIfPresent([String: [Double]].self, forKey: .activity_profile)) ?? [:]
         activity_daily = (try? c.decodeIfPresent([String: DailyStat].self, forKey: .activity_daily)) ?? [:]
+        activity_slots = (try? c.decodeIfPresent([String: ActivitySlots].self, forKey: .activity_slots)) ?? [:]
         profile = try? c.decodeIfPresent(Profile.self, forKey: .profile)
         cardio = try? c.decodeIfPresent(Cardio.self, forKey: .cardio)
         fitness = try? c.decodeIfPresent(Fitness.self, forKey: .fitness)

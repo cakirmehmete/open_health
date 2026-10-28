@@ -146,6 +146,34 @@ final class HealthExportTests: XCTestCase {
         s.workouts = [walk, other]
         let trims = HealthExport.workoutMetKcal(s)
         // (4 MET x 80 kg x 0.25 h) + (2 MET x 80 kg x 0.25 h)
-        XCTAssertEqual(trims["2026-10-26"] ?? 0, 120, accuracy: 0.001)
+        XCTAssertEqual(trims["2026-10-26"]?.reduce(0, +) ?? 0, 120, accuracy: 0.001)
+        XCTAssertEqual(trims["2026-10-26"]?[40] ?? 0, 80, accuracy: 0.001)
+        XCTAssertEqual(trims["2026-10-26"]?[41] ?? 0, 40, accuracy: 0.001)
+    }
+
+    func testActivityLandsInItsQuarterHourNotAtMidnight() throws {
+        var slot = ActivitySlots(active_kcal: Array(repeating: 0, count: 96),
+                                 steps: Array(repeating: 0, count: 96),
+                                 minutes: Array(repeating: 0, count: 96), basal_kcal_per_min: 1.2)
+        slot.steps[56] = 255; slot.active_kcal[56] = 4.5; slot.minutes[56] = 4
+        slot.minutes[57] = 15
+        let daily = ["2026-05-28": DailyStat(active_kcal: 5, total_kcal: 1700, steps: 300, distance_m: 229)]
+        let samples = HealthExport.activitySamples(daily: daily, slots: ["2026-05-28": slot],
+                                                   canShare: { _ in true }, now: .distantFuture)
+            .compactMap { $0 as? HKQuantitySample }
+        let start = try XCTUnwrap(Calendar.current.date(from: DateComponents(year: 2026, month: 5, day: 28, hour: 14)))
+        let steps = samples.filter { $0.quantityType.identifier == HKQuantityTypeIdentifier.stepCount.rawValue }
+        XCTAssertEqual(steps.count, 1)
+        XCTAssertEqual(steps.first?.startDate, start)
+        XCTAssertEqual(steps.first?.endDate, start.addingTimeInterval(15 * 60))
+        XCTAssertEqual(steps.first?.quantity.doubleValue(for: .count()), 255)
+        // Worn but idle: basal energy only, for the minutes the ring reported.
+        let basal = samples.filter { $0.quantityType.identifier == HKQuantityTypeIdentifier.basalEnergyBurned.rawValue }
+        XCTAssertEqual(basal.map { $0.quantity.doubleValue(for: .kilocalorie()) }.sorted(), [4.8, 18])
+        XCTAssertFalse(samples.contains { Calendar.current.component(.hour, from: $0.startDate) == 0 })
+
+        // An older core without slots still gets the daily totals.
+        let legacy = HealthExport.activitySamples(daily: daily, slots: [:], canShare: { _ in true })
+        XCTAssertEqual(legacy.count, 4)
     }
 }
