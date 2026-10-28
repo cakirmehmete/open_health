@@ -45,10 +45,16 @@ struct StagedNightEntry: Codable {
     var stages: [Int]
     /// Summary window that these cells were mapped onto. Missing in older caches.
     var windowKey: String? = nil
-    /// "nssa" (Oura's sleepstaging model) or "signals" (our estimate when NSSA cannot run).
+    /// "nssa" (Oura's sleepstaging model) or `unstaged` (the model declined these
+    /// inputs). Older caches may hold "signals", a retired HR/motion estimate that is
+    /// treated as a miss.
     var source: String? = nil
     /// Wall-clock start (unix s) of the first NSSA epoch (floor30 of the bedtime start).
     var t0Unix: Double? = nil
+
+    static let unstaged = "unstaged"
+    /// Stages from Oura's model (entries from before `source` existed were NSSA).
+    var isOuraStaging: Bool { !stages.isEmpty && (source == nil || source == "nssa") }
 }
 
 private struct ModelCacheFile<Entry: Codable>: Codable {

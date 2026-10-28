@@ -739,42 +739,7 @@ final class StabilityTests: XCTestCase {
         XCTAssertEqual(auto.hrvRem, 76)
     }
 
-    func testRefineDeepStagesAndEstimateStagesAndBedtimeOverrides() throws {
-        let startUnix: Int64 = 1_791_151_863
-        let endUnix: Int64 = 1_791_181_563
-        let epochs = Int((endUnix - startUnix) / 30)
-        var rawStages = Array(repeating: 2, count: epochs)
-        for i in 0..<24 { rawStages[i] = 4 }
-        for i in 220..<260 { rawStages[i] = 3 }
-        for i in 480..<520 { rawStages[i] = 3 }
-        for i in (epochs - 16)..<epochs { rawStages[i] = 4 }
-
-        var hrTimed: [[Double]] = []
-        var hrvTimed: [[Double]] = []
-        var t = startUnix + 300
-        while t <= endUnix {
-            let frac = Double(t - startUnix) / Double(endUnix - startUnix)
-            let quiet = (0.06...0.18).contains(frac) || (0.28...0.38).contains(frac)
-            hrTimed.append([Double(t), quiet ? 54.0 : 62.0])
-            hrvTimed.append([Double(t), quiet ? 42.0 : 32.0])
-            t += 300
-        }
-        var night = NightRow(date: "2026-10-05", start: "00:11", end: "08:26",
-                             start_unix: startUnix, end_unix: endUnix, in_bed_h: 8.2)
-        night.series_t = NightTimedSeries(hr: hrTimed, hrv: hrvTimed,
-                                          motion: [[Double(startUnix + 60), 18.0], [Double(endUnix - 60), 15.0]])
-
-        let refined = Sleep.refineDeepStages(stages: rawStages, night: night)
-        XCTAssertEqual(refined.count, rawStages.count)
-        let deepCount = refined.filter { $0 == 1 }.count
-        XCTAssertGreaterThanOrEqual(deepCount, 20)
-
-        let estimated = try XCTUnwrap(Sleep.estimateStages(night: night))
-        XCTAssertEqual(estimated.count, epochs)
-        XCTAssertTrue(estimated.allSatisfy { (1...4).contains($0) })
-        XCTAssertGreaterThan(estimated.filter { $0 == 1 }.count, 0)
-        XCTAssertGreaterThan(estimated.filter { $0 == 2 }.count, 0)
-
+    func testBedtimeOverrides() throws {
         let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("oura-bedtime-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tmpDir) }

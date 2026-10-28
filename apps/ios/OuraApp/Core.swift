@@ -326,17 +326,13 @@ enum Core {
     }
 
     private static func applySleepStages(_ staged: [String: [Int]], to s: inout Summary) {
-        // Source + first-epoch time of each staged night (NSSA, or the signal estimate).
+        // First-epoch time of each night Oura's model staged. Its hypnograms are used
+        // verbatim (oura-summary is_oura_staging); unstaged nights keep no stages.
         let meta = SleepStaging.cachedEntries(nights: s.nights, profile: s.profile)
         for i in s.nights.indices {
-            guard s.nights[i].start_ds != nil, var stages = staged[s.nights[i].stagingKey], !stages.isEmpty else { continue }
+            guard s.nights[i].start_ds != nil, let stages = staged[s.nights[i].stagingKey], !stages.isEmpty else { continue }
             let entry = meta[s.nights[i].stagingKey]
-            let source = entry?.source ?? "nssa"
-            // Oura's own hypnograms are used verbatim (oura-summary is_oura_staging);
-            // only the signal estimate gets the deep-sleep recovery.
-            if !Sleep.isOuraStaging(source) && !stages.contains(1) {
-                stages = Sleep.refineDeepStages(stages: stages, night: s.nights[i])
-            }
+            let source = "nssa"
             s.nights[i].stages = stages
             s.nights[i].stages_full = stages
             s.nights[i].staging_source = source

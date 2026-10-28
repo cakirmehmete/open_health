@@ -135,9 +135,13 @@ struct InsightsView: View {
                         RangeSlider(lower: need - 0.5, upper: need + 1, value: hours,
                                     domain: (need - 3)...(need + 3),
                                     format: { Self.hm($0) })
-                        if night.hasHypnogram, let deep = night.deep_pct, let rem = night.rem_pct, let light = night.light_pct {
+                        if night.hasHypnogram, Sleep.isOuraStaging(night.staging_source),
+                           let deep = night.deep_pct, let rem = night.rem_pct, let light = night.light_pct {
                             StageStrip(deep: deep, light: light, rem: rem, wake: night.wake_pct ?? 0)
-                            Text(Sleep.isOuraStaging(night.staging_source) ? "Staged by Oura's model" : "Signal estimate")
+                            Text("Staged by Oura's model")
+                                .font(.caption2).foregroundStyle(Ink.dim)
+                        } else {
+                            Text("Not staged: Oura's sleep model couldn't run on this night")
                                 .font(.caption2).foregroundStyle(Ink.dim)
                         }
                     }
