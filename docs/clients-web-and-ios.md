@@ -213,6 +213,11 @@ has no `illness`) and the ring-clock warnings (`clock.warnings`). Still iOS-only
   systems, ring RMSSD remains visible in the app rather than being mislabeled as
   SDNN. Reconciliation removes only this exporter's legacy `openoura.hrv.*` SDNN
   records, using existing authorization; it requests no new SDNN access.
+- **Apple Fitness Move ring** (iOS only by nature: it's an Apple Health export
+  option). With "Count toward Apple Fitness Move ring" on, the 15-min Active Energy
+  samples are saved inside workouts (a detected workout, or an "Other" movement
+  bout) because Fitness credits other apps' energy to Move only from workouts.
+  Exercise and Stand are Apple-only types and can't be written.
 - **Sleep score + breathing rate** (`nights[].sleep_score`, `breath_rate`).
 - **Skin temperature / latest HR vitals and trend pages**, **hourly heart rate**
   (`hourly_hr` is FFI-only; no `/api` endpoint yet).

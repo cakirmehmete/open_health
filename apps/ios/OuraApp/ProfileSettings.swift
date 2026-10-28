@@ -163,6 +163,7 @@ struct ProfileSettingsView: View {
                         Text(health.status).font(.footnote).foregroundStyle(Obs.ink2)
                     }
                     if health.enabled {
+                        Toggle("Count toward Apple Fitness Move ring", isOn: $health.fillMoveRing)
                         Button("Remove Open Oura samples from Health") {
                             health.removeExportedSamples()
                         }
@@ -171,7 +172,7 @@ struct ProfileSettingsView: View {
                 } header: {
                     Text("Apple Health")
                 } footer: {
-                    Text("Exports workouts (and removes ones the ring no longer detects), sleep stages, heart rate, HRV, resting HR, steps, active calories, and distance. Data stays on this iPhone.")
+                    Text("Exports workouts (and removes ones the ring no longer detects), sleep stages, heart rate, HRV, resting HR, steps, active calories, and distance. Data stays on this iPhone. To count toward the Move ring, active calories are saved inside workouts: detected ones, or \"Other\" movement bouts. Apps can't fill Exercise or Stand.")
                 }
             }
             .scrollContentBackground(.hidden)

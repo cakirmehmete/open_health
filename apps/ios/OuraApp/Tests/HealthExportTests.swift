@@ -176,4 +176,49 @@ final class HealthExportTests: XCTestCase {
         let legacy = HealthExport.activitySamples(daily: daily, slots: [:], canShare: { _ in true })
         XCTAssertEqual(legacy.count, 4)
     }
+
+    func testMoveRingPlanPutsActiveEnergyInsideWorkouts() throws {
+        let kcal = try XCTUnwrap(HKObjectType.quantityType(forIdentifier: .activeEnergyBurned))
+        let steps = try XCTUnwrap(HKObjectType.quantityType(forIdentifier: .stepCount))
+        let day = try XCTUnwrap(Calendar.current.date(from: DateComponents(year: 2026, month: 10, day: 27)))
+        func slot(_ i: Int, _ value: Double, _ type: HKQuantityType? = nil) -> HKQuantitySample {
+            let a = day.addingTimeInterval(Double(i) * 900)
+            let kind = type == nil ? "kcal15" : "steps15"
+            return HKQuantitySample(type: type ?? kcal, quantity: HKQuantity(unit: type == nil ? .kilocalorie() : .count(), doubleValue: value),
+                                    start: a, end: a.addingTimeInterval(900),
+                                    metadata: [HKMetadataKeySyncIdentifier: "openoura.\(kind).2026-10-27.\(i).\(Int(value))",
+                                               HKMetadataKeySyncVersion: 1])
+        }
+        // 08:00-08:30 and 08:45 (a 15-min pause stays one bout), a 2 kcal blip at
+        // noon, a detected run 17:00-17:25, then 18:00 after it.
+        let samples: [HKObject] = [slot(32, 10), slot(33, 12), slot(35, 6), slot(48, 2),
+                                   slot(68, 30), slot(69, 25), slot(72, 8), slot(32, 900, steps)]
+        let run = HealthExport.PlannedWorkout(id: "run", type: .running,
+                                              start: day.addingTimeInterval(68 * 900),
+                                              end: day.addingTimeInterval(68 * 900 + 25 * 60), kcal: nil)
+        let plan = HealthExport.moveRingPlan(samples: samples, workouts: [run])
+
+        // Steps and the too-small blip stay loose; everything else rides on a workout.
+        XCTAssertEqual(plan.samples.count, 2)
+        XCTAssertEqual(plan.workouts.count, 3)
+        let total = plan.workouts.reduce(0) { $0 + $1.energyKcal }
+        XCTAssertEqual(total, 91, accuracy: 0.001)
+
+        let ran = try XCTUnwrap(plan.workouts.first { $0.id == "run" })
+        XCTAssertEqual(ran.energyKcal, 55, accuracy: 0.001)
+        // The 17:15 slot is clamped to the run's 17:25 end.
+        XCTAssertTrue(ran.energy.allSatisfy { $0.endDate <= ran.end && $0.startDate >= ran.start })
+        XCTAssertTrue(ran.syncID.hasSuffix(".550mv"))
+
+        let bouts = plan.workouts.filter { $0.id.hasPrefix("move.") }.sorted { $0.start < $1.start }
+        XCTAssertEqual(bouts.map(\.energyKcal), [28, 8])
+        XCTAssertEqual(bouts.first?.start, day.addingTimeInterval(32 * 900))
+        XCTAssertEqual(bouts.first?.end, day.addingTimeInterval(36 * 900))
+        XCTAssertEqual(bouts.first?.type, .other)
+        // Saved energy is re-keyed to its workout, so a changed bout replaces its samples.
+        let owner = try XCTUnwrap(bouts.first).syncID.dropFirst("openoura.".count)
+        XCTAssertTrue(bouts.first!.energy.allSatisfy {
+            ($0.metadata?[HKMetadataKeySyncIdentifier] as? String)?.hasSuffix(".in.\(owner)") == true
+        })
+    }
 }

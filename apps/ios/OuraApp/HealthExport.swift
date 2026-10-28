@@ -12,6 +12,7 @@ final class HealthExport: ObservableObject {
     private static let enabledKey = "health.export.enabled"
     private static let fingerprintKey = "health.export.fp"
     private static let pendingKey = "health.export.pending"
+    private static let moveRingKey = "health.export.moveRing"
     /// The last export didn't land (typically: Health is unreadable while the phone
     /// is locked). The cached summary is retried once the phone unlocks.
     static var exportPending: Bool { UserDefaults.standard.bool(forKey: pendingKey) }
@@ -31,6 +32,16 @@ final class HealthExport: ObservableObject {
     @Published var enabled: Bool {
         didSet { UserDefaults.standard.set(enabled, forKey: Self.enabledKey) }
     }
+    /// Save active energy inside workouts so it counts toward Apple Fitness's Move
+    /// ring. With an Apple Watch paired, Fitness ignores other apps' loose Active
+    /// Energy and credits only energy that belongs to a workout. On by default.
+    @Published var fillMoveRing: Bool {
+        didSet {
+            UserDefaults.standard.set(fillMoveRing, forKey: Self.moveRingKey)
+            if enabled, let cached = SummaryCache.load() { push(cached) }
+        }
+    }
+    static var fillsMoveRing: Bool { UserDefaults.standard.object(forKey: moveRingKey) as? Bool ?? true }
     @Published var status: String = ""
     @Published private(set) var lastExportAt: Date? = UserDefaults.standard.object(forKey: "health.export.at") as? Date
 
@@ -40,6 +51,7 @@ final class HealthExport: ObservableObject {
 
     private init() {
         enabled = UserDefaults.standard.bool(forKey: Self.enabledKey)
+        fillMoveRing = Self.fillsMoveRing
     }
 
     static var shareTypes: Set<HKSampleType> {
@@ -209,8 +221,11 @@ final class HealthExport: ObservableObject {
             return false
         }
 
-        let samples = buildSamples(summary)
-        let workouts = plannedWorkouts(summary.workouts)
+        var samples = buildSamples(summary)
+        var workouts = plannedWorkouts(summary.workouts)
+        if Self.fillsMoveRing, canShare(HKObjectType.workoutType()) {
+            (samples, workouts) = Self.moveRingPlan(samples: samples, workouts: workouts)
+        }
         let beatSeries = plannedHeartbeats(Self.distinctNights(summary.nights))
         dlog("health", "export \(samples.count) samples, \(workouts.count) workouts, \(beatSeries.count) beat series")
         let types = Self.reconciliationTypes(canShare: canShare)
@@ -243,6 +258,7 @@ final class HealthExport: ObservableObject {
         }
 
         let wantedIDs = Set(samples.compactMap(Self.syncID) + workouts.map(\.syncID) + workouts.compactMap(\.kcalSyncID)
+                            + workouts.flatMap { $0.energy.compactMap(Self.syncID) }
                             + beatSeries.map(\.syncID))
         let stale = ours.filter { sample in
             guard let id = Self.syncID(sample) else { return true }
@@ -320,7 +336,7 @@ final class HealthExport: ObservableObject {
     static func fingerprint(_ s: Summary) -> String {
         // Force one reconciliation after upgrading from the mislabeled SDNN
         // writer, and another when the OS first supports the proper RMSSD type.
-        var parts = ["hrv-rmssd-v1:\(ringHRVType?.identifier ?? "unavailable")"]
+        var parts = ["hrv-rmssd-v1:\(ringHRVType?.identifier ?? "unavailable")", "move:\(fillsMoveRing)"]
         // Daytime HR comes from the event table, not the summary, so let an
         // otherwise unchanged summary still reconcile once per hour.
         parts.append("ids-v2:\(Int(Date().timeIntervalSince1970 / 3600)):\(s.fitness?.vo2max ?? 0)")
@@ -391,15 +407,22 @@ final class HealthExport: ObservableObject {
         sample.metadata?[HKMetadataKeySyncIdentifier] as? String
     }
 
-    private struct PlannedWorkout {
+    struct PlannedWorkout {
         let id: String
         let type: HKWorkoutActivityType
         let start: Date
         let end: Date
         /// Active kcal from Oura's energy model, attached to the workout.
         let kcal: Double?
+        /// The day's 15-min Active Energy samples that fall in this workout, saved
+        /// with it so Apple Fitness credits them to Move (see `moveRingPlan`).
+        var energy: [HKQuantitySample] = []
+        var energyKcal: Double { energy.reduce(0) { $0 + $1.quantity.doubleValue(for: .kilocalorie()) } }
         // A changed calorie figure replaces the workout instead of leaving the old one.
-        var syncID: String { HealthExport.syncPrefix + "workout.\(id)" + (kcal.map { ".\(Int($0.rounded()))kcal" } ?? "") }
+        var syncID: String {
+            HealthExport.syncPrefix + "workout.\(id)" + (kcal.map { ".\(Int($0.rounded()))kcal" } ?? "")
+                + (energy.isEmpty ? "" : ".\(Int((energyKcal * 10).rounded()))mv")
+        }
         /// The calorie sample saved inside the workout; reconciled with it.
         var kcalSyncID: String? { kcal.map { HealthExport.syncPrefix + "workout-kcal.\(id).\(Int($0.rounded()))" } }
     }
@@ -444,6 +467,77 @@ final class HealthExport: ObservableObject {
             out.append(PlannedWorkout(id: w.id, type: Self.activityType(w.label), start: start, end: end, kcal: w.kcal))
         }
         return out
+    }
+
+    /// Bouts split where the ring logged no active energy for this long.
+    static let moveBoutGap: TimeInterval = 30 * 60
+    /// Smaller bouts stay loose Active Energy rather than become a workout each.
+    static let moveBoutMinKcal = 5.0
+
+    /// Apple Fitness's Move ring, with an Apple Watch paired, ignores other apps'
+    /// loose Active Energy and counts only energy saved inside a workout. So the
+    /// 15-min Active Energy samples move into workouts: into a detected workout when
+    /// the slot's midpoint falls in it, otherwise into a "movement" bout (type Other)
+    /// of consecutive active slots. Health's Active Energy total is unchanged; each
+    /// sample is still saved once. Exercise and Stand can't be written by apps.
+    static func moveRingPlan(samples: [HKObject], workouts: [PlannedWorkout])
+        -> (samples: [HKObject], workouts: [PlannedWorkout]) {
+        let slotPrefix = syncPrefix + "kcal15."
+        var loose: [HKObject] = []
+        var slots: [HKQuantitySample] = []
+        for sample in samples {
+            if let q = sample as? HKQuantitySample, syncID(q)?.hasPrefix(slotPrefix) == true {
+                slots.append(q)
+            } else {
+                loose.append(sample)
+            }
+        }
+        var planned = workouts
+        var free: [HKQuantitySample] = []
+        for slot in slots.sorted(by: { $0.startDate < $1.startDate }) {
+            let mid = slot.startDate.addingTimeInterval(slot.endDate.timeIntervalSince(slot.startDate) / 2)
+            if let w = planned.firstIndex(where: { $0.start <= mid && mid < $0.end }) {
+                planned[w].energy.append(slot)
+            } else {
+                free.append(slot)
+            }
+        }
+        var bouts: [[HKQuantitySample]] = []
+        for slot in free {
+            if let last = bouts.last?.last,
+               slot.startDate.timeIntervalSince(last.endDate) < moveBoutGap,
+               !planned.contains(where: { $0.start < slot.startDate && $0.end > last.endDate }) {
+                bouts[bouts.count - 1].append(slot)
+            } else {
+                bouts.append([slot])
+            }
+        }
+        for bout in bouts {
+            guard let first = bout.first, let last = bout.last,
+                  bout.reduce(0, { $0 + $1.quantity.doubleValue(for: .kilocalorie()) }) >= moveBoutMinKcal else {
+                loose.append(contentsOf: bout)
+                continue
+            }
+            // kcal15.<day>.<slot>.<value> -> move.<day>.<slot>
+            let parts = (syncID(first) ?? "").dropFirst(slotPrefix.count).split(separator: ".")
+            let id = "move." + parts.prefix(2).joined(separator: ".") + ".\(bout.count)"
+            planned.append(PlannedWorkout(id: id, type: .other, start: first.startDate, end: last.endDate,
+                                          kcal: nil, energy: bout))
+        }
+        // Each sample is re-keyed to its workout, so a workout that changes takes its
+        // energy with it, and clamped to the workout so the builder accepts it (a
+        // slot's midpoint is inside its workout, so the clamp never empties it).
+        for i in planned.indices where !planned[i].energy.isEmpty {
+            let w = planned[i]
+            let owner = String(w.syncID.dropFirst(syncPrefix.count))
+            planned[i].energy = w.energy.map { s in
+                let id = String((syncID(s) ?? "").dropFirst(syncPrefix.count))
+                return HKQuantitySample(type: s.quantityType, quantity: s.quantity,
+                                        start: max(s.startDate, w.start), end: min(s.endDate, w.end),
+                                        metadata: meta("\(id).in.\(owner)"))
+            }
+        }
+        return (loose, planned)
     }
 
     /// A run of consecutive ring beats inside one sleep, as Health's heartbeat series:
@@ -585,13 +679,15 @@ final class HealthExport: ObservableObject {
                 }
                 // The workout's calories ride on the workout (Bevel and Fitness read them
                 // there); the day's Active Energy sample leaves these minutes out.
-                guard let kcal = plan.kcal, kcal > 0, let kcalID = plan.kcalSyncID,
-                      let type = HKObjectType.quantityType(forIdentifier: .activeEnergyBurned),
-                      self.canShare(type) else { end(); return }
-                let sample = HKQuantitySample(type: type, quantity: HKQuantity(unit: .kilocalorie(), doubleValue: kcal),
-                                              start: plan.start, end: plan.end,
-                                              metadata: Self.meta(String(kcalID.dropFirst(Self.syncPrefix.count))))
-                builder.add([sample]) { success, error in
+                var energy = plan.energy
+                if let kcal = plan.kcal, kcal > 0, let kcalID = plan.kcalSyncID,
+                   let type = HKObjectType.quantityType(forIdentifier: .activeEnergyBurned), self.canShare(type) {
+                    energy.append(HKQuantitySample(type: type, quantity: HKQuantity(unit: .kilocalorie(), doubleValue: kcal),
+                                                   start: plan.start, end: plan.end,
+                                                   metadata: Self.meta(String(kcalID.dropFirst(Self.syncPrefix.count)))))
+                }
+                guard !energy.isEmpty else { end(); return }
+                builder.add(energy) { success, error in
                     guard success else { fail(error, fallback: "Could not add workout calories."); return }
                     end()
                 }
