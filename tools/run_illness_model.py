@@ -21,13 +21,12 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _common import resolve_model
 from epoch_time import build_epochs, is_dated, make_unix_s
-from respiratory_rate import respiratory_rate
+import run_breathing_rate
 
 REPO = Path(__file__).resolve().parent.parent
 MODEL = str(resolve_model(REPO, "illness_detection", "0_5_1", oldest="0_5_0", newest="0_5_999"))
 
 N_DAYS = 30
-IBI_TAGS = {0x44, 0x60, 0x71}
 TEMP_TAGS = {0x46, 0x69, 0x75}
 DAY = 86400.0
 
@@ -65,7 +64,7 @@ def load(db):
 
 
 def bed_windows(rows, unix_s):
-    """(wake_day_index, start_unix, end_unix) per sleep period from bedtime events."""
+    """(start_unix, end_unix, (start_ds, end_ds, captured_unix)) per bedtime event."""
     out = []
     for ds, tag, dj, cu in rows:
         if tag != 0x76:
@@ -75,31 +74,22 @@ def bed_windows(rows, unix_s):
         e = d.get("bedtime_end_ds")
         if s is None or e is None or e <= s:
             continue
-        out.append((unix_s(s, cu), unix_s(e, cu)))
+        out.append((unix_s(s, cu), unix_s(e, cu), (s, e, cu)))
     return out
 
 
-def nightly_biometrics(rows, unix_s, tz, windows):
+def nightly_biometrics(rows, unix_s, tz, windows, breathing):
     """Per wake-day: avg_breath, avg_hr, lowest_hr, avg_hrv (RMSSD), skin_temp,
     keyed by local calendar day index. Longest sleep per day wins.
 
     HR/HRV come from the ring's own `hrv_event` (5-min rmssd_ms + hr_bpm) — the same
     source the shared summary uses — which is far cleaner than IBI-derived RMSSD.
-    Breathing rate needs the raw IBI (respiratory sinus arrhythmia)."""
-    ibi_t, ibi_v = [], []
+    Breathing rate is Oura's own ecore calculation on that bedtime (`breathing`, a
+    run_breathing_rate.Nights), as the Oura app feeds Symptom Radar."""
     hrv_t, hrv_rmssd, hrv_hr = [], [], []
     temp_t, temp_v = [], []
     for ds, tag, dj, cu in rows:
-        if tag in IBI_TAGS:
-            d = json.loads(dj)
-            base = unix_s(ds, cu)
-            acc = 0.0
-            for v in (d.get("ibi_ms") or []):
-                if v:
-                    acc += v / 1000.0
-                    ibi_t.append(base + acc)
-                    ibi_v.append(v)
-        elif tag == 0x5D:  # hrv_event: 5-min avg RMSSD + HR
+        if tag == 0x5D:  # hrv_event: 5-min avg RMSSD + HR
             d = json.loads(dj)
             base = unix_s(ds, cu)
             step = float(d.get("interval_min", 5)) * 60.0
@@ -121,12 +111,11 @@ def nightly_biometrics(rows, unix_s, tz, windows):
                 if tv and tv > 20:  # skin temp; drop obvious off-finger lows
                     temp_t.append(base)
                     temp_v.append(tv)
-    ibi_t, ibi_v = np.array(ibi_t), np.array(ibi_v, float)
     hrv_t = np.array(hrv_t); hrv_rmssd = np.array(hrv_rmssd); hrv_hr = np.array(hrv_hr)
     temp_t, temp_v = np.array(temp_t), np.array(temp_v, float)
 
     per_day = {}
-    for start, end in windows:
+    for start, end, bedtime in windows:
         dur = end - start
         if dur < 3600:  # ignore naps <1h for the nightly biometrics
             continue
@@ -141,9 +130,8 @@ def nightly_biometrics(rows, unix_s, tz, windows):
             continue
         avg_hr = float(np.median(hr_win))
         lowest = float(np.min(hr_win))  # lowest 5-min-averaged HR
-        im = (ibi_t >= start) & (ibi_t <= end)
-        breath, _var, _n = respiratory_rate(ibi_t[im], ibi_v[im]) if im.sum() > 200 \
-            else (float("nan"), float("nan"), 0)
+        br = breathing.analyze(*bedtime)
+        breath = br["breath_rate"] if br else float("nan")
         tm = (temp_t >= start) & (temp_t <= end)
         skin = float(np.median(temp_v[tm])) if tm.any() else float("nan")
         row = dict(avg_breath=breath, avg_hr=avg_hr, lowest_hr=lowest,
@@ -210,7 +198,8 @@ def run(db, tz, profile):
     rows = [row for row in rows if is_dated(epochs, row[0], row[3])]
 
     windows = bed_windows(rows, unix_s)
-    per_day = nightly_biometrics(rows, unix_s, tz, windows)
+    breathing = run_breathing_rate.Nights(run_breathing_rate.load(db))
+    per_day = nightly_biometrics(rows, unix_s, tz, windows, breathing)
     if not per_day:
         return {"available": False, "status": "MISSING_SLEEP_DATA"}
     sed, rest = activity_by_day(rows, unix_s, tz)

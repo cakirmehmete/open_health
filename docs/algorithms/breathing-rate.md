@@ -92,5 +92,19 @@ Result on 2026-10-28: every case was bit-identical (see `re/RESULTS.md`). The un
 repeats 6 of these nights against stored native outputs and record hashes, so it runs
 anywhere without the Android library.
 
+## Where the app uses it
+
+- Web: `tools/run_breathing_rate.py --batch` runs it per summary night (longest ring
+  bedtime in the night, NSSA's corrected IBIs, 0x47 motion) → `nights[].breath_rate`
+  (`breath_rate_source: "ecore"`), and `run_illness_model.py` feeds it to Symptom Radar.
+- iOS: `EcoreBreathing.swift` is a line-by-line Swift twin, checked record by record in
+  `Tests/EcoreBreathingTests.swift` against the native-checked nights above
+  (`tools/make_ecore_breathing_fixture.py`). `NightBreathing.swift` runs it per night,
+  sets `breath_rate` (shown on the sleep score card and written to Apple Health), and
+  passes it to `IllnessModel` by wake date.
+
+Without the runner (no Python on the web), `breath_rate` falls back to the median of the
+ring's own per-window values (`breath_rate_source: "ring"`).
+
 Not covered: real ring data (none available yet), and how the app builds the motion array
 (see above).

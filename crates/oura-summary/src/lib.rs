@@ -91,6 +91,9 @@ pub struct ModelOutputs {
     pub illness: Option<Value>,     // run_illness_model.py (Symptom Radar)
     pub breathing: Option<Value>,   // run_bdi_model.py --batch (one entry or null per sleep range)
     pub stress: Option<Value>,      // run_stress_model.py --json (daytime stress days + samples)
+    /// run_breathing_rate.py --batch: Oura's ecore nightly breathing rate (one entry or
+    /// null per sleep range). Replaces the ring's per-window values for `breath_rate`.
+    pub breath_rate: Option<Value>,
 }
 
 /// Runs the torch models. `oura-cli` shells out to Python; the native client runs
@@ -1857,6 +1860,7 @@ pub fn build_summary(
         illness,
         breathing,
         stress,
+        breath_rate: ecore_breath,
     } = runner.run(ModelInputs {
         db,
         tz,
@@ -1872,6 +1876,19 @@ pub fn build_summary(
             arr.iter()
                 .filter_map(|b| {
                     Some(((b["start_ds"].as_i64()?, b["captured_unix"].as_i64()?), b.clone()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // Oura's ecore breathing rate per night, keyed the same way.
+    let ecore_breath_by_night: std::collections::HashMap<(i64, i64), f64> = ecore_breath
+        .as_ref()
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|b| {
+                    let rate = b["breath_rate"].as_f64().filter(|r| *r > 0.0)?;
+                    Some(((b["start_ds"].as_i64()?, b["captured_unix"].as_i64()?), rate))
                 })
                 .collect()
         })
@@ -2009,7 +2026,10 @@ pub fn build_summary(
         let raw_mean_hrv = mean(&nt.rmssd);
         let night_rhr = raw_lowest_hr.map(|x| x.round());
         let night_hrv = raw_mean_hrv.map(|x| x.round());
-        let night_breath = median_of(&nt.breath);
+        // Oura's ecore nightly breathing rate when the runner produced it (what the Oura
+        // app shows); otherwise the median of the ring's own per-window values.
+        let ecore_breath = ecore_breath_by_night.get(&(nt.start_ds, nt.captured_unix)).copied();
+        let night_breath = ecore_breath.or_else(|| median_of(&nt.breath));
         let is_main_sleep = (nt.end_ds - nt.start_ds) >= sleep_score::MIN_BASELINE_SLEEP_DS;
         let rhr_baseline = if is_main_sleep {
             let priors: Vec<f64> = prior_main_rhr
@@ -2120,6 +2140,8 @@ pub fn build_summary(
                 age: demo.age,
             }) } else { Value::Null },
             "breath_rate": night_breath.map(|b| (b * 10.0).round() / 10.0),
+            "breath_rate_source": if ecore_breath.is_some() { json!("ecore") }
+                else if night_breath.is_some() { json!("ring") } else { Value::Null },
         });
         night_json["stages_5min"] = json!(stages_5min);
         night_json["stages_t0_unix"] = json!(stages_t0_unix);

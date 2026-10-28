@@ -75,6 +75,7 @@ targets:
       - path: Models.swift
       - path: Core.swift
       - path: IllnessAlert.swift
+      - path: EcoreBreathing.swift
       - path: WorkCoordinator.swift
       - path: Components.swift
       - path: Reports.swift
@@ -98,6 +99,7 @@ targets:
       - path: ActivityModel.swift
       - path: IllnessModel.swift
       - path: BreathingModel.swift
+      - path: NightBreathing.swift
       - path: StressModel.swift
       - path: StepCounter.swift
       - path: TorchBridge.mm

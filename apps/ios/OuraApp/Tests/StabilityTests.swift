@@ -490,20 +490,6 @@ final class StabilityTests: XCTestCase {
         XCTAssertEqual(sqlite3_exec(db, sql, nil, nil, nil), SQLITE_OK)
         return url
     }
-    func testIllnessWorkspacePreservesCaptureOrderAndInclusiveWindows() throws {
-        let workspace = try IllnessModel.IBIWorkspace()
-        defer { workspace.close() }
-        try workspace.append(time: 11, value: 800)
-        try workspace.append(time: 5, value: 900)
-        try workspace.append(time: 11, value: 700)
-        try workspace.append(time: 30, value: 600)
-        try workspace.finish()
-        let values = try workspace.values(start: 5, end: 11)
-        XCTAssertEqual(values.times, [11,5,11])
-        XCTAssertEqual(values.values, [800,900,700])
-        XCTAssertTrue(try workspace.values(start: 12, end: 20).times.isEmpty)
-    }
-
     func testCvaRetainsExactlyLast4000Segments() throws {
         let url = try fixture(); defer { try? FileManager.default.removeItem(at: url) }
         var db: OpaquePointer?

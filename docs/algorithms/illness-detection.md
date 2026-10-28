@@ -23,7 +23,7 @@ detects and handles them internally.
 
 | # | forward() arg | Shape | Unit / encoding | Oura source field | Male-user value |
 |---|---|---|---|---|---|
-| 1 | `average_breath` | [30,1] | breaths/min | nightly sleep avg respiratory rate | real value |
+| 1 | `average_breath` | [30,1] | breaths/min | nightly sleep avg respiratory rate (ecore `breathingRateAvg`; here `ecore_breathing_rate.py` / `EcoreBreathing.swift`) | real value |
 | 2 | `average_heart_rate` | [30,1] | bpm | nightly sleep average HR | real value |
 | 3 | `lowest_heart_rate` | [30,1] | bpm | nightly sleep lowest HR | real value |
 | 4 | `average_hrv` | [30,1] | ms (RMSSD) | nightly sleep average HRV | real value |

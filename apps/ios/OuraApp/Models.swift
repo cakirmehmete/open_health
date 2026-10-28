@@ -80,8 +80,11 @@ struct NightRow: Codable, Identifiable {
     var series: NightSeries? = nil
     var series_t: NightTimedSeries? = nil
     var autonomic: StageAutonomic? = nil
-    /// Nightly respiratory rate (breaths/min), the ring's own per-window estimate.
+    /// Nightly respiratory rate (breaths/min).
     var breath_rate: Double? = nil
+    /// "ecore" (Oura's nightly calculation, EcoreBreathing) or "ring" (median of the
+    /// ring's per-window values, used until the ecore pass has run).
+    var breath_rate_source: String? = nil
     var sleep_score: SleepScore? = nil
     /// Oura's SleepNet-BDI result (web: `nights[].breathing`; iOS: BreathingModel).
     var breathing: Breathing? = nil

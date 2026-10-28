@@ -203,7 +203,8 @@ impl ModelRunner for PythonRunner {
 
         let bdi_args = vec![db.display().to_string(), tz.to_string(), "--batch".into()];
         let stress_args = vec![db.display().to_string(), tz.to_string(), "--json".into()];
-        let (sleep_batch, cva, activity, illness, breathing, stress) = match (root.as_deref(), py.as_deref()) {
+        let br_args = vec![db.display().to_string(), tz.to_string(), "--batch".into()];
+        let (sleep_batch, cva, activity, illness, breathing, stress, breath_rate) = match (root.as_deref(), py.as_deref()) {
             (Some(r), Some(p)) => std::thread::scope(|s| {
                 let sh = s.spawn(|| {
                     run_py_json_stdin(r, p, "tools/run_sleep_model.py", &sleep_args, &sleep_stdin)
@@ -215,6 +216,9 @@ impl ModelRunner for PythonRunner {
                 let ah = s.spawn(|| run_py_json(r, p, "tools/run_activity_model.py", &act_args));
                 let ih = s.spawn(|| run_py_json(r, p, "tools/run_illness_model.py", &illness_args));
                 let th = s.spawn(|| run_py_json(r, p, "tools/run_stress_model.py", &stress_args));
+                let rh = s.spawn(|| {
+                    run_py_json_stdin(r, p, "tools/run_breathing_rate.py", &br_args, &sleep_stdin)
+                });
                 (
                     sh.join().ok().flatten(),
                     ch.join().ok().flatten(),
@@ -222,9 +226,10 @@ impl ModelRunner for PythonRunner {
                     ih.join().ok().flatten(),
                     bh.join().ok().flatten(),
                     th.join().ok().flatten(),
+                    rh.join().ok().flatten(),
                 )
             }),
-            _ => (None, None, None, None, None, None),
+            _ => (None, None, None, None, None, None, None),
         };
         // Only Oura's model stages a night: a window it can't stage stays unstaged (the
         // batch's `null`), never an HR/motion guess.
@@ -235,6 +240,7 @@ impl ModelRunner for PythonRunner {
             illness,
             breathing,
             stress,
+            breath_rate,
         }
     }
 }
