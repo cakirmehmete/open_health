@@ -399,19 +399,28 @@ final class HealthExport: ObservableObject {
         let weight = s.profile?.weight_kg ?? 75
         var out: [String: [Double]] = [:]
         for w in s.workouts where w.isWorkout >= 0.5 && w.kcal != nil {
-            guard let (start, end) = workoutDates(w) else { continue }
-            var t = start
-            while t < end {
-                let day = Calendar.current.startOfDay(for: t)
-                let key = Self.ymd(day)
-                let bucket = Int(t.timeIntervalSince(day) / 900)
-                let bucketEnd = min(end, day.addingTimeInterval(Double(bucket + 1) * 900))
-                if let profile = s.activity_profile[key], bucket < profile.count, bucket < 96 {
-                    out[key, default: Array(repeating: 0, count: 96)][bucket] +=
-                        max(0, profile[bucket]) * weight * bucketEnd.timeIntervalSince(t) / 3600
-                }
-                t = bucketEnd
+            for part in metKcalSlots(s, w, weight: weight) {
+                out[part.day, default: Array(repeating: 0, count: 96)][part.bucket] += part.kcal
             }
+        }
+        return out
+    }
+
+    /// One workout's MET estimate per 15-min profile slot it overlaps (the share of
+    /// that slot it covers). Empty when its days have no profile.
+    static func metKcalSlots(_ s: Summary, _ w: WorkoutSession, weight: Double) -> [(day: String, bucket: Int, kcal: Double)] {
+        guard let (start, end) = workoutDates(w) else { return [] }
+        var out: [(day: String, bucket: Int, kcal: Double)] = []
+        var t = start
+        while t < end {
+            let day = Calendar.current.startOfDay(for: t)
+            let key = Self.ymd(day)
+            let bucket = Int(t.timeIntervalSince(day) / 900)
+            let bucketEnd = min(end, day.addingTimeInterval(Double(bucket + 1) * 900))
+            if let profile = s.activity_profile[key], bucket < profile.count, bucket < 96 {
+                out.append((key, bucket, max(0, profile[bucket]) * weight * bucketEnd.timeIntervalSince(t) / 3600))
+            }
+            t = bucketEnd
         }
         return out
     }

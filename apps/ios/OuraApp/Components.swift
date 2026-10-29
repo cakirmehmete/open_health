@@ -51,6 +51,8 @@ struct SessionRow: View {
     let startHM: String
     /// Oura's energy_expenditure model for this workout; nil when it didn't run.
     var kcal: Double? = nil
+    /// Active kcal from the ring's MET readings over the workout (`Summary.metKcal`).
+    var metKcal: Double? = nil
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: activitySymbol(label)).font(.system(size: 14))
@@ -58,6 +60,7 @@ struct SessionRow: View {
             Text(actLabel(label)).font(Obs.mono(13, .medium)).foregroundStyle(Obs.ink)
             Spacer()
             if let kcal { Text("\(Int(kcal.rounded())) kcal").font(Obs.mono(12)).foregroundStyle(Obs.ink2) }
+            if let metKcal { Text("MET \(Int(metKcal.rounded())) kcal").font(Obs.mono(12)).foregroundStyle(Obs.ink2) }
             Text("\(durationMin) min").font(Obs.mono(12)).foregroundStyle(Obs.ink2)
             Text(startHM).font(Obs.mono(11)).foregroundStyle(Obs.muted)
         }

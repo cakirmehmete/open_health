@@ -1547,7 +1547,7 @@ struct ActivityReport: View {
             Text("No sessions detected this day.").font(Obs.mono(12)).foregroundStyle(Obs.ink2)
         } else {
             VStack(spacing: 14) {
-                ForEach(ws) { w in SessionRow(label: w.label, durationMin: w.durationMin, startHM: w.startHM, kcal: w.kcal) }
+                ForEach(ws) { w in SessionRow(label: w.label, durationMin: w.durationMin, startHM: w.startHM, kcal: w.kcal, metKcal: s.metKcal(w)) }
             }
         }
     }

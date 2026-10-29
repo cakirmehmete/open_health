@@ -690,6 +690,7 @@ function openActDetail(s) {
         ${kv("Time", `${hhmm(s.start)}–${s.end}`)}
         ${kv("Duration", `${s.duration_min} min`)}
         ${s.kcal != null ? kv("Calories (Oura model)", `${Math.round(s.kcal).toLocaleString()} kcal`) : ""}
+        ${s.active_kcal != null ? kv("Calories (MET estimate)", `${Math.round(s.active_kcal).toLocaleString()} kcal`) : ""}
         ${kv("Confidence", conf)}
         ${kv("Workout", work ? "yes" : "no")}
       </div>

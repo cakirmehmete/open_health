@@ -63,7 +63,7 @@ struct TodayCard: View {
                     }
                     MovementRidge(profile: s.activity_profile[day] ?? [])
                     ForEach(Array(s.workoutsOn(day).prefix(2))) { w in
-                        SessionRow(label: w.label, durationMin: w.durationMin, startHM: w.startHM, kcal: w.kcal)
+                        SessionRow(label: w.label, durationMin: w.durationMin, startHM: w.startHM, kcal: w.kcal, metKcal: s.metKcal(w))
                     }
                 }
                 .contentShape(Rectangle())
