@@ -51,14 +51,19 @@ struct TodayCard: View {
                         ObsTag("activity", icon: "figure.walk")
                         Spacer()
                         if let st = s.activity_daily[day] {
-                            Text("\(Int(st.steps ?? 0)) steps").font(Obs.mono(11)).foregroundStyle(Obs.ink2)
-                            Text("· \(Int(st.active_kcal ?? 0)) kcal").font(Obs.mono(11)).foregroundStyle(Obs.ink2)
+                            // steps only from Oura's step_counter; nothing when it didn't run
+                            if let steps = st.steps {
+                                Text("\(Int(steps)) steps").font(Obs.mono(11)).foregroundStyle(Obs.ink2)
+                            }
+                            if let kcal = st.active_kcal {
+                                Text("· \(Int(kcal)) kcal").font(Obs.mono(11)).foregroundStyle(Obs.ink2)
+                            }
                         }
                         Image(systemName: "chevron.right").font(.system(size: 11)).foregroundStyle(Obs.trace)
                     }
                     MovementRidge(profile: s.activity_profile[day] ?? [])
                     ForEach(Array(s.workoutsOn(day).prefix(2))) { w in
-                        SessionRow(label: w.label, durationMin: w.durationMin, startHM: w.startHM)
+                        SessionRow(label: w.label, durationMin: w.durationMin, startHM: w.startHM, kcal: w.kcal)
                     }
                 }
                 .contentShape(Rectangle())
@@ -807,10 +812,8 @@ struct RootView: View {
     @State private var showAllDays = false
     @State private var showSync = false
     @State private var showProfile = false
-    /// Home is the Today (model insights) and Status tabs; the full reports open in
-    /// place and stay open across launches until closed.
-    @AppStorage("home.reports") private var showReports = false
-    @State private var showSleepDebt = false
+    /// The ring → Health pipeline status (battery, syncs, Health export, background runs).
+    @State private var showStatus = false
     @State private var vital: VitalKind?
     @State private var loadGeneration = 0
     @State private var isRefreshingSummary = false
@@ -843,23 +846,14 @@ struct RootView: View {
         return stamp.isEmpty ? "latest sync" : "latest · \(stamp)"
     }
     var body: some View {
-        Group {
-            if showReports, let s {
-                ZStack { Obs.canvas.ignoresSafeArea(); content(s) }
+        ZStack {
+            Obs.canvas.ignoresSafeArea()
+            if let s {
+                content(s)
             } else {
-                TabView {
-                    NavigationStack {
-                        InsightsView(summary: s, onOpenReports: { showReports = true })
-                    }
-                    .tabItem { Label("Today", systemImage: "sun.max") }
-                    NavigationStack {
-                        StatusView(ring: ring, summary: s,
-                                   onSyncNow: syncNow,
-                                   onOpenRing: { showSync = true },
-                                   onOpenProfile: { showProfile = true },
-                                   onOpenInsights: { showReports = true })
-                    }
-                    .tabItem { Label("Status", systemImage: "dot.radiowaves.left.and.right") }
+                VStack(spacing: 14) {
+                    ProgressView().tint(Obs.ink)
+                    Text("Loading your data…").font(Obs.mono(12)).foregroundStyle(Obs.ink2)
                 }
             }
         }
@@ -870,7 +864,15 @@ struct RootView: View {
             SyncView(ring: ring, onSynced: refreshAfterSync, onReset: resetAndReload)
         }
         .sheet(isPresented: $showProfile) { ProfileSettingsView(profile: s?.profile, onSaved: refreshDerivedData) }
-        .sheet(isPresented: $showSleepDebt) { if let debt = s?.sleepDebt { SleepDebtDetail(debt: debt) } }
+        .sheet(isPresented: $showStatus) {
+            NavigationStack {
+                StatusView(ring: ring, summary: s,
+                           onSyncNow: syncNow,
+                           onOpenRing: { showStatus = false; showSync = true },
+                           onOpenProfile: { showStatus = false; showProfile = true })
+                    .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { showStatus = false } } }
+            }
+        }
         .sheet(item: $vital) { kind in if let s { VitalTrendView(s: s, kind: kind) } }
         #if TORCH
         .environment(\.dayAnalysis, DayAnalysisContext(summary: s,
@@ -1070,7 +1072,7 @@ struct RootView: View {
                         Text("Open Oura").font(Obs.serif(22)).foregroundStyle(Obs.ink)
                         Text("beta").font(Obs.mono(9, .medium)).tracking(1.2).foregroundStyle(Obs.muted)
                         Spacer()
-                        Button { showReports = false } label: {
+                        Button { showStatus = true } label: {
                             Image(systemName: "gauge.with.dots.needle.33percent")
                                 .font(.system(size: 17)).foregroundStyle(Obs.ink2)
                         }
@@ -1085,12 +1087,6 @@ struct RootView: View {
                     if let err = s.error {
                         ObsTag("no data"); Text(err).font(Obs.mono(13)).foregroundStyle(Obs.bad)
                     } else {
-                        // digest headline
-                        if let d = s.digest {
-                            Text(d).font(Obs.prose(16, .regular)).foregroundStyle(Obs.ink)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-
                         // today — last night's sleep + that day's activity as one unit, the
                         // hero of the home; tap the sleep or the activity region for its report.
                         if let day = s.days.first {
@@ -1144,9 +1140,30 @@ struct RootView: View {
                                       action: { vital = .oxygen })
                         }
 
-                        if let debt = s.sleepDebt {
+                        // Oura's SleepNet-BDI on the latest night it judged.
+                        if let night = s.nights.first(where: { $0.breathing != nil }), let b = night.breathing {
                             ObsRule()
-                            SleepDebtCard(debt: debt) { showSleepDebt = true }
+                            HStack {
+                                ObsTag("breathing disturbances", icon: "lungs")
+                                Spacer()
+                                if let wake = s.wakeYmd(night) {
+                                    Text(String(wake.suffix(5))).font(Obs.mono(10)).foregroundStyle(Obs.ink2)
+                                }
+                            }
+                            BreathingSection(breathing: b,
+                                             history: Array(s.nightlySeries { $0.breathing?.status == 1 ? $0.breathing?.odi_pct : nil }
+                                                 .suffix(30).map(\.value)))
+                        }
+
+                        // Oura's daytime stress model on the latest day it had readings.
+                        if let stress = s.stress, let day = stress.days.last {
+                            ObsRule()
+                            HStack {
+                                ObsTag("daytime stress", icon: "bolt.heart")
+                                Spacer()
+                                Text(String(day.date.suffix(5))).font(Obs.mono(10)).foregroundStyle(Obs.ink2)
+                            }
+                            StressDaySection(stress: stress, day: day)
                         }
 
                         // Torch build: Oura's own illness model (no model-free fallback).

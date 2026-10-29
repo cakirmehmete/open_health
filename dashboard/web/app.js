@@ -371,66 +371,6 @@ function renderDay(d) {
   if (note) box.append(note);
 }
 
-const debtDuration = (minutes) => {
-  const m = Math.max(0, Math.round(minutes || 0));
-  return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`;
-};
-const debtStateCopy = (state) => ({
-  high: "Your sleep debt is high right now. Prioritize several consistent nights with enough sleep.",
-  moderate: "You’ve built up a moderate amount of sleep debt. A few longer nights can help you recover.",
-  low: "You’re mostly meeting your sleep need, with a small amount left to recover.",
-  none: "You’ve met your sleep need consistently over the past two weeks.",
-}[state] || "You’ve met your sleep need consistently over the past two weeks.");
-
-function sleepDebtSvg(sd, mode) {
-  const values = (sd.days || []).map((x) => mode === "debt" ? x.cumulative_debt_min : x.total_sleep_min);
-  const w = 900, h = 190, max = mode === "debt" ? 600 : Math.max(720, ...values.filter((x) => x != null));
-  const x = (i) => i / Math.max(1, values.length - 1) * w;
-  const y = (v) => h - Math.min(1, Math.max(0, v / max)) * h;
-  let path = "", started = false;
-  values.forEach((v, i) => {
-    if (v == null) { started = false; return; }
-    path += `${started ? " L" : "M"}${x(i).toFixed(1)} ${y(v).toFixed(1)}`; started = true;
-  });
-  const grid = [0.25, 0.5, 0.75].map((f) => `<line x1="0" y1="${h * (1-f)}" x2="${w}" y2="${h * (1-f)}"/>`).join("");
-  const need = mode === "sleep" ? `<line class="sd-need" x1="0" y1="${y(sd.need_h * 60)}" x2="${w}" y2="${y(sd.need_h * 60)}"/>` : "";
-  return `<svg class="sd-chart" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><g class="sd-grid">${grid}</g>${need}<path class="sd-line" d="${path}"/></svg>`;
-}
-
-function openSleepDebt(sd) {
-  let dlg = $("sleep-debt-dialog");
-  if (!dlg) {
-    dlg = el("dialog", "dialog sleep-debt-dialog"); dlg.id = "sleep-debt-dialog";
-    document.body.append(dlg);
-    dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); });
-  }
-  const valid = sd.valid;
-  dlg.innerHTML = `<form method="dialog">
-    <div class="sd-detail-head"><div><h3>Sleep debt</h3><div class="dialog-sub">Past ${sd.window_days || 14} days</div></div><button class="dd-close" aria-label="Close">×</button></div>
-    ${valid ? `<div class="sd-value">${debtDuration(sd.debt_min)} <span>${esc(sd.state)}</span></div><p class="sd-copy">${debtStateCopy(sd.state)}</p>`
-      : `<div class="sd-value small">Not enough data yet</div><p class="sd-copy">${sd.valid_days || 0} of 5 sleep days available within the past 2 weeks.</p>`}
-    <div class="sd-tabs"><button type="button" data-mode="debt" class="active">Cumulative debt</button><button type="button" data-mode="sleep">Total sleep</button></div>
-    <div class="sd-graph">${sleepDebtSvg(sd, "debt")}</div>
-    <div class="sd-axis"><span>${esc((sd.days?.[0]?.date || "").slice(5))}</span><span>${esc((sd.days?.at(-1)?.date || "").slice(5))}</span></div>
-    <p class="subhead">How it works</p><p class="sd-copy">Sleep debt estimates missed sleep over the past 14 days. Total sleep combines main sleep and naps, recent days carry more weight, and your sleep need (${debtDuration(sd.need_h * 60)}) is personalized from your typical sleep over the past 3 months, ignoring unusually short or long days.</p>
-  </form>`;
-  dlg.querySelectorAll(".sd-tabs button").forEach((button) => button.addEventListener("click", () => {
-    dlg.querySelectorAll(".sd-tabs button").forEach((b) => b.classList.toggle("active", b === button));
-    dlg.querySelector(".sd-graph").innerHTML = sleepDebtSvg(sd, button.dataset.mode);
-  }));
-  dlg.showModal();
-}
-
-function renderSleepDebt(d) {
-  const box = $("sleep-debt"), sd = d.sleep_debt;
-  box.innerHTML = "";
-  if (!sd) { box.append(el("div", "error", "No sleep data yet.")); return; }
-  const button = el("button", "sd-card"); button.type = "button";
-  if (sd.valid) button.innerHTML = `<div class="sd-card-value">${debtDuration(sd.debt_min)} <span>${esc(sd.state)}</span></div><p>${debtStateCopy(sd.state)}</p><span class="sd-period">Past ${sd.window_days || 14} days · view details →</span>`;
-  else button.innerHTML = `<div class="sd-card-value pending">${sd.valid_days || 0} of 5 days available</div><p>5 days of sleep data are needed within the past 2 weeks.</p><span class="sd-period">View details →</span>`;
-  button.addEventListener("click", () => openSleepDebt(sd)); box.append(button);
-}
-
 // Symptom Radar: Oura's on-device illness-detection model. Traffic-light state from the
 // calibrated decision + the biomarkers (breath / lowest HR / HRV / temp) that deviate
 // from your personal baseline. See docs/algorithms/illness-detection.md.
@@ -522,7 +462,7 @@ function notifyIllness(ill, trafficLight, flagged) {
 }
 
 // Daytime stress: Oura's stress_daytime_sensing model on each calm, awake RMSSD reading
-// (tools/run_stress_model.py). Same card on iOS (InsightsView stressCard / StressDetail).
+// (tools/run_stress_model.py). Same section on iOS (ModelCards.swift StressDaySection: home + activity report).
 const STRESS_COLOR = { stressed: "#d5524a", neutral: "var(--faint)", restored: "var(--accent)" };
 const hmin = (m) => (m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`);
 
@@ -909,7 +849,6 @@ const statTile = (k, v) => `<div class="ss"><div class="ss-v">${v}</div><div cla
 // sections (iOS `DayExport` exports one tab's section in the same shapes).
 function exportDayJson(d, ymd, axis) {
   const n = nightForDay(d, ymd);
-  const debt = ((d.sleep_debt || {}).days || []).find((x) => x.date === ymd) || null;
   const hr = HOURLY_HR || {};
   const tzOff = d.tz ?? browserTzOffset();
   const tzName = (typeof Intl !== "undefined" && Intl.DateTimeFormat && Intl.DateTimeFormat().resolvedOptions().timeZone)
@@ -919,7 +858,7 @@ function exportDayJson(d, ymd, axis) {
     timezone: tzName,
     tz_offset: tzOff,
     app_version: "web", profile: d.profile || null,
-    sleep: n ? { night: n, sleep_debt: debt } : null,
+    sleep: n ? { night: n } : null,
     activity: {
       daily: (d.activity_daily || {})[ymd] || null,
       profile_met: (d.activity_profile || {})[ymd] || [],
@@ -1034,7 +973,7 @@ function stageBar(n) {
   return bar;
 }
 
-// science-based read of the night → a few plain-language sentences + a sleep-debt note
+// science-based read of the night → a few plain-language sentences
 function sleepInterpretation(d, n, m) {
   if (n.staging_complete === false) return el("p", "error", "Sleep analysis is incomplete; gaps cannot establish awake time or sleep onset.");
   const wrap = el("div", "interp");
@@ -1051,14 +990,6 @@ function sleepInterpretation(d, n, m) {
   if (m.waso_min != null && m.awakenings != null)
     out.push(`You spent ${Math.round(m.waso_min)} min awake across ${m.awakenings} awakening${m.awakenings === 1 ? "" : "s"} after first falling asleep.`);
   out.forEach((t) => wrap.append(el("p", "interp-p", t)));
-  const sd = d.sleep_debt;
-  if (sd && sd.valid && sd.debt_min != null) {
-    const h = Math.floor(sd.debt_min / 60), mm = Math.round(sd.debt_min % 60);
-    const note = el("div", "interp-debt");
-    note.innerHTML = `<div class="id-v">${h}h ${mm}m</div><div class="id-k">accumulated sleep debt vs an ${sd.need_h} h nightly need` +
-      `${sd.recent_shortfall_min > 0 ? ` · last night ${Math.round(sd.recent_shortfall_min)} min short` : ""}</div>`;
-    wrap.append(note);
-  }
   return wrap;
 }
 
@@ -2323,12 +2254,11 @@ async function load() {
   LAST_DEVICE_SERIAL = d.device && d.device.serial;
   $("digest").classList.remove("skeleton", "skeleton-text");
   $("digest").classList.add("reveal");
-  $("digest").innerHTML = (d.digest || "").replace(/([+-]?\d[\d.]*\s?(?:%|bpm|ms|m\/s))/g, '<span class="metric">$1</span>');
+  $("digest").textContent = ""; // no headline: no Oura model judges recovery here
   renderActions(d);
   renderTiles(d);
   HR_QUARTER_LOAD = null;
   renderDay(d);
-  renderSleepDebt(d);
   renderIllness(d);
   renderStress(d);
   renderCardio(d);

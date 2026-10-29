@@ -60,16 +60,6 @@ enum Obs {
         return isGood ? good : bad
     }
 
-    static func debt(_ state: String) -> Color {
-        switch state {
-        case "none": return good
-        case "low": return chart
-        case "moderate": return bad
-        case "high": return alert
-        default: return chart
-        }
-    }
-
     static func serif(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
         .system(size: size, weight: weight, design: .serif)
     }

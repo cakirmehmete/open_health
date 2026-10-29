@@ -49,12 +49,15 @@ struct SessionRow: View {
     let label: String
     let durationMin: Int
     let startHM: String
+    /// Oura's energy_expenditure model for this workout; nil when it didn't run.
+    var kcal: Double? = nil
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: activitySymbol(label)).font(.system(size: 14))
                 .foregroundStyle(Obs.ink2).frame(width: 20)
             Text(actLabel(label)).font(Obs.mono(13, .medium)).foregroundStyle(Obs.ink)
             Spacer()
+            if let kcal { Text("\(Int(kcal.rounded())) kcal").font(Obs.mono(12)).foregroundStyle(Obs.ink2) }
             Text("\(durationMin) min").font(Obs.mono(12)).foregroundStyle(Obs.ink2)
             Text(startHM).font(Obs.mono(11)).foregroundStyle(Obs.muted)
         }

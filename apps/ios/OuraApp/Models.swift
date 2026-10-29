@@ -85,7 +85,6 @@ struct NightRow: Codable, Identifiable {
     /// "ecore" (Oura's nightly calculation, EcoreBreathing) or "ring" (median of the
     /// ring's per-window values, used until the ecore pass has run).
     var breath_rate_source: String? = nil
-    var sleep_score: SleepScore? = nil
     /// Oura's SleepNet-BDI result (web: `nights[].breathing`; iOS: BreathingModel).
     var breathing: Breathing? = nil
     var id: String { (date ?? "") + (start ?? "") }
@@ -94,72 +93,6 @@ struct NightRow: Codable, Identifiable {
     var hasSignals: Bool {
         !(series_t?.hr.isEmpty ?? true) || !(series?.hr.isEmpty ?? true)
             || !(series_t?.motion.isEmpty ?? true) || !(series?.motion.isEmpty ?? true)
-    }
-}
-/// One component of the literature-based sleep score, with the paper behind it.
-struct SleepScoreComponent: Codable, Identifiable {
-    var key: String
-    var score: Double
-    var weight: Double
-    var detail: [String: JSONValue]?
-    var id: String { key }
-    var label: String {
-        switch key {
-        case "duration": return "duration"
-        case "efficiency": return "efficiency"
-        case "onset_latency": return "time to fall asleep"
-        case "waso": return "awake during the night"
-        case "awakenings": return "awakenings"
-        case "architecture": return "stage balance"
-        case "physiology": return "heart & HRV"
-        default: return key
-        }
-    }
-    var source: String? {
-        if case .string(let text)? = detail?["source"] { return text }
-        return nil
-    }
-}
-
-/// A sleep score computed from published norms rather than from Oura's model — every
-/// threshold in it traces to a paper. See `oura-summary/src/sleep_score.rs`.
-struct SleepScore: Codable {
-    var score: Double
-    var components: [SleepScoreComponent] = []
-    var basis: String?
-}
-
-/// Minimal JSON value, so a component's `detail` can be carried through and read
-/// without the app needing to know every key the Rust side might add.
-enum JSONValue: Codable {
-    case string(String), number(Double), bool(Bool), array([JSONValue]), null
-    init(from decoder: Decoder) throws {
-        let c = try decoder.singleValueContainer()
-        if c.decodeNil() { self = .null }
-        else if let v = try? c.decode(Bool.self) { self = .bool(v) }
-        else if let v = try? c.decode(Double.self) { self = .number(v) }
-        else if let v = try? c.decode(String.self) { self = .string(v) }
-        else if let v = try? c.decode([JSONValue].self) { self = .array(v) }
-        else { self = .null }
-    }
-    func encode(to encoder: Encoder) throws {
-        var c = encoder.singleValueContainer()
-        switch self {
-        case .string(let v): try c.encode(v)
-        case .number(let v): try c.encode(v)
-        case .bool(let v): try c.encode(v)
-        case .array(let v): try c.encode(v)
-        case .null: try c.encodeNil()
-        }
-    }
-    var text: String {
-        switch self {
-        case .string(let v): return v
-        case .number(let v): return v == v.rounded() ? String(Int(v)) : String(format: "%.1f", v)
-        case .bool(let v): return v ? "yes" : "no"
-        case .array(let v): return v.map(\.text).joined(separator: "–")
-        case .null: return "—"
-        }
     }
 }
 
@@ -197,25 +130,6 @@ struct Breathing: Codable {
 }
 struct Cardio: Codable { var vascular_age: Double?; var chronological_age: Double?; var pwv_ms: Double?; var segments: Int? }
 struct Fitness: Codable { var vo2max: Double? }
-struct SleepDebtDay: Codable, Identifiable {
-    var date: String
-    var total_sleep_min: Double?
-    var sleep_need_min: Double
-    var shortfall_min: Double?
-    var cumulative_debt_min: Double?
-    var valid_days: Int
-    var id: String { date }
-}
-struct SleepDebtSummary: Codable {
-    var debt_min: Double = 0
-    var recent_shortfall_min: Double = 0
-    var valid: Bool = false
-    var need_h: Double = 8
-    var valid_days: Int = 0
-    var window_days: Int = 14
-    var state: String = "none"
-    var days: [SleepDebtDay] = []
-}
 struct Device: Codable {
     var serial: String?; var firmware: String?
     var battery_pct: Int?
@@ -361,7 +275,6 @@ struct UndatedNight: Codable {
 struct Summary: Codable {
     var analysis_digest: String? = nil
     var analysis_version: Int? = nil
-    var digest: String?
     var device: Device?
     var nights: [NightRow] = []
     var clock: ClockDiag?
@@ -372,7 +285,6 @@ struct Summary: Codable {
     var profile: Profile?
     var cardio: Cardio?
     var fitness: Fitness?
-    var sleepDebt: SleepDebtSummary?
     var illness: IllnessResult?           // on-device only (torch Symptom Radar; not in the JSON)
     var stress: DaytimeStress?            // on-device only (torch daytime stress; not in the JSON)
     var workouts: [WorkoutSession] = []   // on-device only (not in the JSON)
@@ -382,8 +294,7 @@ struct Summary: Codable {
     // out of decoding.
     enum CodingKeys: String, CodingKey {
         case analysis_digest, analysis_version
-        case digest, device, nights, clock, vitals, activity_profile, activity_daily, activity_slots, profile, cardio, fitness, error
-        case sleepDebt = "sleep_debt"
+        case device, nights, clock, vitals, activity_profile, activity_daily, activity_slots, profile, cardio, fitness, error
     }
     init() {}
     init(nights: [NightRow]) { self.nights = nights }
@@ -394,7 +305,6 @@ struct Summary: Codable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         analysis_digest = try? c.decodeIfPresent(String.self, forKey: .analysis_digest)
         analysis_version = try? c.decodeIfPresent(Int.self, forKey: .analysis_version)
-        digest = try? c.decodeIfPresent(String.self, forKey: .digest)
         device = try? c.decodeIfPresent(Device.self, forKey: .device)
         nights = (try? c.decodeIfPresent([NightRow].self, forKey: .nights)) ?? []
         clock = try? c.decodeIfPresent(ClockDiag.self, forKey: .clock)
@@ -405,7 +315,6 @@ struct Summary: Codable {
         profile = try? c.decodeIfPresent(Profile.self, forKey: .profile)
         cardio = try? c.decodeIfPresent(Cardio.self, forKey: .cardio)
         fitness = try? c.decodeIfPresent(Fitness.self, forKey: .fitness)
-        sleepDebt = try? c.decodeIfPresent(SleepDebtSummary.self, forKey: .sleepDebt)
         error = try? c.decodeIfPresent(String.self, forKey: .error)
     }
     /// recent days (newest first) that have a movement profile.
