@@ -522,7 +522,7 @@ function notifyIllness(ill, trafficLight, flagged) {
 }
 
 // Daytime stress: Oura's stress_daytime_sensing model on each calm, awake RMSSD reading
-// (tools/run_stress_model.py). Same card on iOS (InsightsView stressCard / StressDetail).
+// (tools/run_stress_model.py). Same section on iOS (ModelCards.swift StressDaySection: home + activity report).
 const STRESS_COLOR = { stressed: "#d5524a", neutral: "var(--faint)", restored: "var(--accent)" };
 const hmin = (m) => (m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`);
 
@@ -690,6 +690,7 @@ function openActDetail(s) {
         ${kv("Time", `${hhmm(s.start)}–${s.end}`)}
         ${kv("Duration", `${s.duration_min} min`)}
         ${s.kcal != null ? kv("Calories (Oura model)", `${Math.round(s.kcal).toLocaleString()} kcal`) : ""}
+        ${s.active_kcal != null ? kv("Calories (MET estimate)", `${Math.round(s.active_kcal).toLocaleString()} kcal`) : ""}
         ${kv("Confidence", conf)}
         ${kv("Workout", work ? "yes" : "no")}
       </div>

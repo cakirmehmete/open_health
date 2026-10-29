@@ -57,14 +57,14 @@ formula over age, sex and weight). If no model covers a value, leave it out.
 | Stage breakdown | `stageBar` | `StageBreakdown` | `nights[].{deep,light,rem,wake}_pct` | SleepNet |
 | **Autonomic recovery by stage** (mean HR/HRV in deep/light/REM) | `sleepSection` autonomic grid | `SleepReport` `autonomicGrid` | `nights[].autonomic` | SleepNet (needs hypnogram) |
 | **Nightly breathing rate** (Oura's ecore calculation; also the Symptom Radar's `average_breath` and Apple Health Respiratory Rate) | — (in the summary, not drawn yet) | `SleepScoreCard` breath rate; Health export | `nights[].breath_rate`, `breath_rate_source` (`ecore` / `ring`) | ecore `breathing_rate_calculate_averages` (web: `run_breathing_rate.py --batch` → `ecore_breathing_rate.py` · iOS: `NightBreathing` → `EcoreBreathing.swift`) |
-| **Breathing disturbances** (ODI = % of sleep epochs flagged, events/h, NREM/REM split) | `sleepSection` "Breathing disturbances" grid | Today tab card → `BreathingDetail` (InsightsView.swift) | `nights[].breathing` | SleepNet-BDI (web: `run_bdi_model.py --batch` · iOS: `BreathingModel`) |
-| **Daytime stress** (stressed / neutral / restored minutes per day, per-reading chart, baselines) | `renderStress` "Daytime stress" panel | Today tab card → `StressDetail` (InsightsView.swift) | top-level `stress` | stress_daytime_sensing (web: `run_stress_model.py --json` · iOS: `StressModel`) |
-| **Symptom Radar** (NO / MINOR / MAJOR signs + the four biomarkers) and **"may be getting sick" alert** (once per day and level) | `renderIllness` + `notifyIllness` (browser notification) | `IllnessCard` / Today `radarCard` → `SymptomRadarDetail`; `IllnessAlert` (local notification) | top-level `illness` | illness_detection_0_5_1 (web: `run_illness_model.py` · iOS: `IllnessModel`) |
+| **Breathing disturbances** (ODI = % of sleep epochs flagged, events/h, NREM/REM split) | `sleepSection` "Breathing disturbances" grid | home section + `SleepReport` section → `BreathingSection` (ModelCards.swift) | `nights[].breathing` | SleepNet-BDI (web: `run_bdi_model.py --batch` · iOS: `BreathingModel`) |
+| **Daytime stress** (stressed / neutral / restored minutes per day, per-reading chart, baselines) | `renderStress` "Daytime stress" panel | home section (latest day) + `ActivityReport` section (that day) → `StressDaySection` (ModelCards.swift) | top-level `stress` | stress_daytime_sensing (web: `run_stress_model.py --json` · iOS: `StressModel`) |
+| **Symptom Radar** (NO / MINOR / MAJOR signs + the four biomarkers) and **"may be getting sick" alert** (once per day and level) | `renderIllness` + `notifyIllness` (browser notification) | `IllnessCard` on the home; `IllnessAlert` (local notification) | top-level `illness` | illness_detection_0_5_1 (web: `run_illness_model.py` · iOS: `IllnessModel`) |
 | **Cardiovascular age** | `renderCardio` | Cardio section | `cardio` | CVA (web: Python · iOS: `CvaModel`) |
 | **VO₂max estimate** | `renderCardio` | Fitness section | `fitness.vo2max` | — (Jackson, model-free) |
 | Movement ridge | `ridgeSvg` | `MovementRidge` | `activity_profile` | — (MET, model-free) |
 | **Activity sessions / workouts** | `openActDetail` (session) | workouts section | `activity` | AAD (web: Python · iOS: `ActivityModel`) |
-| **Workout calories** (Oura's per-workout energy model; MET estimate stays as `active_kcal`) | `openActDetail` "Calories (Oura model)" | Today tab workouts card | `activity[].kcal` (iOS `WorkoutSession.kcal`) | energy_expenditure_2_4_1 (web: `run_activity_model.py` · iOS: `ActivityModel.workoutEnergy`) |
+| **Workout calories** (Oura's per-workout energy model; MET estimate stays as `active_kcal`) | `openActDetail` "Calories (Oura model)" | `SessionRow` kcal (home day card, activity report) | `activity[].kcal` (iOS `WorkoutSession.kcal`) | energy_expenditure_2_4_1 (web: `run_activity_model.py` · iOS: `ActivityModel.workoutEnergy`) |
 | Steps / active calories / **distance** | activity report stats | activity day stats | `activity_daily` (incl. `distance_m`) | — |
 | Previous days browser | `openDaysBrowser` → `openDayPage` | `AllDaysView` → `DayDetailView` | day keys | — |
 | Device & data health | `renderDevice` | device section | `device`, `streams` | — |
@@ -91,14 +91,10 @@ a nap doesn't shadow the real sleep.
   results and analyzes only the latest night when its result is missing. A changed
   bedtime window counts as missing. Older missing nights require “Refresh analysis”
   in their Sleep tab. Automatic runs do not prune the historical model cache.
-- **iOS home = Today + Status tabs**: Today (`InsightsView.swift`) shows each model's and
-  vital's latest result in the look of Oura's app: score rings, dark cards with a range
-  slider against your personal range (10th–90th percentile of recent nights), banded
-  trend charts and a contributors list (Symptom Radar biomarkers, vital consistency). It
-  opens the full reports (`RootView.content`, the old home) in place. Status
-  (`StatusView.swift`) is the ring → Health pipeline plus "Models on this phone"
-  (`ModelListView`). The web home already shows the same results in its own layout; the
-  range sliders and contributor bars are iOS-only for now.
+- **iOS home = the upstream home** (`RootView.content`): digest, day card, vitals, sleep debt, breathing
+  disturbances, daytime stress, Symptom Radar, cardiovascular age, all days, device. The
+  gauge button opens Status (`StatusView.swift`, a sheet): the ring → Health pipeline
+  plus "Models on this phone" (`ModelListView`), which the web has no counterpart for.
 - **Model versions (both)**: a client looks a model up by family, not exact file name.
   It prefers the version its inputs were validated on and otherwise runs the newest one
   present (iOS `ModelFiles.find`, Python `_common.resolve_model`). iOS caches key on the

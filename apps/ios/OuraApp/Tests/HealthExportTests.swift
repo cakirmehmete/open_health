@@ -136,6 +136,11 @@ final class HealthExportTests: XCTestCase {
         XCTAssertEqual(trims["2026-10-26"]?.reduce(0, +) ?? 0, 120, accuracy: 0.001)
         XCTAssertEqual(trims["2026-10-26"]?[40] ?? 0, 80, accuracy: 0.001)
         XCTAssertEqual(trims["2026-10-26"]?[41] ?? 0, 40, accuracy: 0.001)
+        // Each workout's own MET estimate, shown beside the model's calories.
+        XCTAssertEqual(s.metKcal(walk) ?? 0, 120, accuracy: 0.001)
+        XCTAssertEqual(s.metKcal(other) ?? 0, 40, accuracy: 0.001)
+        let unprofiled = WorkoutSession(start: "2026-10-27 10:00", end: "10:30", durationMin: 30, label: "walking", isWorkout: 0.9)
+        XCTAssertNil(s.metKcal(unprofiled))
     }
 
     func testActivityLandsInItsQuarterHourNotAtMidnight() throws {

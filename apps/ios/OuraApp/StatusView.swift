@@ -30,8 +30,8 @@ enum BackgroundLog {
     }
 }
 
-/// Status tab: is the ring → Health pipeline healthy, and which Oura models ran.
-/// Model results are on the Today tab (InsightsView).
+/// Status sheet (gauge button on the home): is the ring → Health pipeline healthy, and
+/// which Oura models ran. Model results are on the home and in the day reports.
 struct StatusView: View {
     @ObservedObject var ring: RingSync
     @ObservedObject var health: HealthExport = .shared
@@ -39,7 +39,6 @@ struct StatusView: View {
     let onSyncNow: () -> Void
     let onOpenRing: () -> Void
     let onOpenProfile: () -> Void
-    let onOpenInsights: () -> Void
 
     var body: some View {
         // Relative times ("12 min ago") and the background log refresh on their own.
@@ -88,15 +87,13 @@ struct StatusView: View {
     }
 
     // ── Models ──
-    // Results live on the Today tab; status keeps which models ran and what failed.
+    // Results live on the home; status keeps which models ran and what failed.
     @ViewBuilder private var insightsSection: some View {
         Section {
             ForEach(summary?.modelErrors ?? [], id: \.self) { error in
                 Text(error).font(.caption).foregroundStyle(.orange)
             }
             NavigationLink("Models on this phone") { ModelListView() }
-            Button("Full sleep, activity & heart reports", action: onOpenInsights)
-                .disabled(summary == nil)
         } header: {
             Text("Oura models")
         }

@@ -1277,6 +1277,11 @@ struct SleepReport: View {
                 SleepScoreCard(score: score, breathRate: n.breath_rate)
             }
 
+            if let b = n.breathing {
+                Rule("breathing disturbances")
+                BreathingSection(breathing: b)
+            }
+
             if n.hasHypnogram {
                 if !n.stagingComplete && n.hasHypnogram {
                     Text("Incomplete sleep analysis. Gaps mean no data, not awake time; sleep metrics are withheld.")
@@ -1512,8 +1517,8 @@ struct ActivityReport: View {
 
         HStack(alignment: .top, spacing: 0) {
             Readout(value: steps.value, caption: steps.unit)
-            Readout(value: st.map { "\(Int($0.active_kcal ?? 0))" } ?? "–", caption: "active kcal")
-            Readout(value: st.map { "\(Int($0.total_kcal ?? 0))" } ?? "–", caption: "total kcal")
+            Readout(value: st?.active_kcal.map { "\(Int($0))" } ?? "–", caption: "active kcal")
+            Readout(value: st?.total_kcal.map { "\(Int($0))" } ?? "–", caption: "total kcal")
             if let d = st?.distance_m { Readout(value: String(format: "%.1f", d / 1000), caption: "distance · km") }
         }
 
@@ -1531,13 +1536,18 @@ struct ActivityReport: View {
             Readout(value: String(format: "%.1f MET", peak), caption: "peak intensity")
         }
 
+        if let stress = s.stress, let d = stress.days.first(where: { $0.date == day }) {
+            Rule("daytime stress")
+            StressDaySection(stress: stress, day: d)
+        }
+
         let ws = s.workoutsOn(day)
         Rule("sessions")
         if ws.isEmpty {
             Text("No sessions detected this day.").font(Obs.mono(12)).foregroundStyle(Obs.ink2)
         } else {
             VStack(spacing: 14) {
-                ForEach(ws) { w in SessionRow(label: w.label, durationMin: w.durationMin, startHM: w.startHM) }
+                ForEach(ws) { w in SessionRow(label: w.label, durationMin: w.durationMin, startHM: w.startHM, kcal: w.kcal, metKcal: s.metKcal(w)) }
             }
         }
     }

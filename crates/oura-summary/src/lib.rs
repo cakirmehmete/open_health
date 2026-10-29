@@ -2160,7 +2160,7 @@ pub fn build_summary(
     asleep_by_day.retain(|day, _| !incomplete_sleep_days.contains(day));
     let sleep_debt = sleep_debt_summary(&asleep_by_day);
 
-    let activity = activity_raw
+    let mut activity = activity_raw
         .as_ref()
         .and_then(|v| v["sessions"].as_array().cloned())
         .unwrap_or_default();
@@ -2171,6 +2171,8 @@ pub fn build_summary(
     // The same active kcal per 15-minute slot, so exports can place it in time
     // instead of as one midnight-to-midnight block.
     let mut slot_kcal: std::collections::BTreeMap<String, [f64; 96]> = Default::default();
+    // MET above rest per local minute, for each workout's MET calorie estimate.
+    let mut met_min: std::collections::BTreeMap<i64, f64> = Default::default();
     let weight = demo.weight_kg;
     // Resting daily expenditure via ecore's Schofield BMR (by age band + sex), instead
     // of the old flat `weight × 24` approximation. Added to active kcal for total kcal.
@@ -2204,12 +2206,39 @@ pub fn build_summary(
                     let kcal = (mv - 1.0).max(0.0) * weight / 60.0;
                     slot_kcal.entry(key.clone()).or_insert([0.0; 96])[bucket] += kcal;
                     *daily.entry(key).or_insert(0.0) += kcal;
+                    *met_min.entry((local / 60.0).floor() as i64).or_insert(0.0) +=
+                        (mv - 1.0).max(0.0);
                 }
             }
         }
     }
-    // A workout's calories come from Oura's energy_expenditure model (`kcal`, set by
-    // the runner); none are guessed from MET when it didn't run.
+    // A workout's model calories come from Oura's energy_expenditure model (`kcal`, set
+    // by the runner). `active_kcal` is the ring's MET readings over its minutes
+    // (MET above rest × kg × hours), the same estimate as the day's active kcal.
+    for sess in activity.iter_mut() {
+        let (Some(start), Some(dur)) = (sess["start"].as_str(), sess["duration_min"].as_f64())
+        else {
+            continue;
+        };
+        let parse = || -> Option<i64> {
+            let (date, time) = start.split_once(' ')?;
+            let mut dp = date.split('-');
+            let y: i64 = dp.next()?.parse().ok()?;
+            let mo: u32 = dp.next()?.parse().ok()?;
+            let dd: u32 = dp.next()?.parse().ok()?;
+            let mut tp = time.split(':');
+            let hh: i64 = tp.next()?.parse().ok()?;
+            let mm: i64 = tp.next()?.parse().ok()?;
+            Some(days_from_civil(y, mo, dd) * 1440 + hh * 60 + mm)
+        };
+        if let Some(m0) = parse() {
+            let kcal: f64 = (m0..m0 + dur as i64)
+                .filter_map(|m| met_min.get(&m))
+                .map(|met| met * weight / 60.0)
+                .sum();
+            sess["active_kcal"] = json!(kcal.round());
+        }
+    }
 
     let activity_daily: Value = daily
         .iter()

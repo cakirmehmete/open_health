@@ -413,6 +413,14 @@ struct Summary: Codable {
 }
 
 extension Summary {
+    /// A workout's active kcal from the ring's MET readings: the 15-min MET-above-rest
+    /// profile × weight × hours, the same estimate the day's active kcal uses. Not a
+    /// model output (that is `WorkoutSession.kcal`); nil when its minutes have no profile.
+    func metKcal(_ w: WorkoutSession) -> Double? {
+        let slots = HealthExport.metKcalSlots(self, w, weight: profile?.weight_kg ?? 75)
+        return slots.isEmpty ? nil : slots.reduce(0) { $0 + $1.kcal }
+    }
+
     /// Symptom Radar from Oura's on-device illness model (torch build with the `.ptl`
     /// bundled). There is no model-free fallback: without the model there is no radar.
     var symptomRadar: IllnessResult? {
