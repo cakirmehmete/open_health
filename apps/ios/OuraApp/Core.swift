@@ -362,6 +362,14 @@ enum Core {
             let asleep = total - Double(stages.filter { $0 == 4 }.count)
             s.nights[i].efficiency = s.nights[i].stagingComplete ? (asleep / total * 100).rounded() : nil
             s.nights[i].autonomic = Sleep.autonomic(night: s.nights[i], stages: s.nights[i].analysisStages)
+            s.nights[i].sleep_score = nil // The base score describes a different hypnogram.
+        }
+        // Staging can be partial while model inputs are still arriving. Never replace
+        // a more complete model-free debt window with a transient "0 of 5" result;
+        // prefer staged sleep only when it covers at least as many distinct days.
+        if let stagedDebt = s.stagedSleepDebt(),
+           stagedDebt.valid_days >= (s.sleepDebt?.valid_days ?? 0) {
+            s.sleepDebt = stagedDebt
         }
     }
     #endif

@@ -814,6 +814,7 @@ struct RootView: View {
     @State private var showProfile = false
     /// The ring → Health pipeline status (battery, syncs, Health export, background runs).
     @State private var showStatus = false
+    @State private var showSleepDebt = false
     @State private var vital: VitalKind?
     @State private var loadGeneration = 0
     @State private var isRefreshingSummary = false
@@ -864,6 +865,7 @@ struct RootView: View {
             SyncView(ring: ring, onSynced: refreshAfterSync, onReset: resetAndReload)
         }
         .sheet(isPresented: $showProfile) { ProfileSettingsView(profile: s?.profile, onSaved: refreshDerivedData) }
+        .sheet(isPresented: $showSleepDebt) { if let debt = s?.sleepDebt { SleepDebtDetail(debt: debt) } }
         .sheet(isPresented: $showStatus) {
             NavigationStack {
                 StatusView(ring: ring, summary: s,
@@ -1087,6 +1089,12 @@ struct RootView: View {
                     if let err = s.error {
                         ObsTag("no data"); Text(err).font(Obs.mono(13)).foregroundStyle(Obs.bad)
                     } else {
+                        // digest headline
+                        if let d = s.digest {
+                            Text(d).font(Obs.prose(16, .regular)).foregroundStyle(Obs.ink)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+
                         // today — last night's sleep + that day's activity as one unit, the
                         // hero of the home; tap the sleep or the activity region for its report.
                         if let day = s.days.first {
@@ -1138,6 +1146,11 @@ struct RootView: View {
                                       series: recentOxygen,
                                       detail: latestOxygen.map { latestLabel(date: s.wakeYmd($0)) },
                                       action: { vital = .oxygen })
+                        }
+
+                        if let debt = s.sleepDebt {
+                            ObsRule()
+                            SleepDebtCard(debt: debt) { showSleepDebt = true }
                         }
 
                         // Oura's SleepNet-BDI on the latest night it judged.

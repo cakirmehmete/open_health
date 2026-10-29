@@ -351,6 +351,7 @@ fn prefer_battery_reading(new_unix: Option<f64>, best_dated_unix: Option<f64>) -
     }
 }
 
+
 fn date_label(unix_s: f64, tz: impl Into<OffsetHours>) -> String {
     let tz = tz.into().0;
     let days = (unix_s as i64 + offset_seconds(tz)).div_euclid(86400);
@@ -367,6 +368,126 @@ fn ymd_label(unix_s: f64, tz: impl Into<OffsetHours>) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+const SLEEP_DEBT_DAYS: i64 = 14;
+/// Fallback need while there isn't enough history to personalize.
+const SLEEP_NEED_DEFAULT_H: f64 = 8.0;
+const SLEEP_NEED_WINDOW_DAYS: i64 = 90;
+const SLEEP_NEED_MIN_VALID_DAYS: usize = 14;
+const SLEEP_NEED_FLOOR_S: f64 = 7.0 * 3600.0;
+const SLEEP_NEED_CEIL_S: f64 = 9.0 * 3600.0;
+const SLEEP_NEED_ROUND_S: f64 = 900.0;
+
+/// Personalized daily sleep need, matching what the Oura app feeds ecore's
+/// `sleep_debt_calculate` (`SleepDebtInput.longTermSleepTimeAvgSeconds`, the
+/// long-term `sleepTimeAvg` baseline): the user's typical sleep over the last
+/// ~3 months, with unusually short or long days filtered out. Causal — only
+/// days strictly before `day` count, so a night never sets its own need.
+/// The IQR fence is our outlier filter (Oura only documents "unusually short
+/// or extra-long nights are filtered out"), and the result is clamped to the
+/// 7–9 h band the app itself cites so chronic under-sleep can't ratify itself
+/// as a low need. Falls back to 8 h until 14 valid days exist.
+fn sleep_need_s(asleep_by_day: &std::collections::BTreeMap<i64, i32>, day: i64) -> i32 {
+    let mut vals: Vec<f64> = asleep_by_day
+        .range(day - SLEEP_NEED_WINDOW_DAYS..day)
+        .map(|(_, &s)| s as f64)
+        .filter(|&s| s > 0.0)
+        .collect();
+    if vals.len() < SLEEP_NEED_MIN_VALID_DAYS {
+        return (SLEEP_NEED_DEFAULT_H * 3600.0) as i32;
+    }
+    vals.sort_by(f64::total_cmp);
+    let quantile = |p: f64| -> f64 {
+        let idx = p * (vals.len() - 1) as f64;
+        let (lo, hi) = (idx.floor() as usize, idx.ceil() as usize);
+        vals[lo] + (vals[hi] - vals[lo]) * (idx - lo as f64)
+    };
+    let (q1, q3) = (quantile(0.25), quantile(0.75));
+    let fence = 1.5 * (q3 - q1);
+    let kept: Vec<f64> = vals
+        .iter()
+        .copied()
+        .filter(|&v| v >= q1 - fence && v <= q3 + fence)
+        .collect();
+    let mean = kept.iter().sum::<f64>() / kept.len() as f64;
+    let need = mean.clamp(SLEEP_NEED_FLOOR_S, SLEEP_NEED_CEIL_S);
+    ((need / SLEEP_NEED_ROUND_S).round() * SLEEP_NEED_ROUND_S) as i32
+}
+
+/// Android's sleep-debt screen works on calendar days, not individual sleep sessions:
+/// a main sleep and a nap ending on the same day both contribute to that day's total.
+/// Build the complete 14-day series here so every client renders the same result.
+fn sleep_debt_summary(asleep_by_day: &std::collections::BTreeMap<i64, i32>) -> Value {
+    use oura_analysis::ported::sleep_debt::{sleep_debt, SleepDebtConfig};
+
+    let Some(&anchor) = asleep_by_day.keys().next_back() else {
+        return json!({
+            "debt_min": 0, "recent_shortfall_min": 0, "valid": false,
+            "need_h": SLEEP_NEED_DEFAULT_H, "valid_days": 0, "window_days": SLEEP_DEBT_DAYS,
+            "state": "none", "days": [],
+        });
+    };
+    let first = anchor - (SLEEP_DEBT_DAYS - 1);
+    let mut days = Vec::with_capacity(SLEEP_DEBT_DAYS as usize);
+
+    // ecore takes a per-day need array, so each day of the window is scored
+    // against the need that was current *that* day.
+    let window = |day: i64| -> (Vec<i32>, Vec<i32>) {
+        let range = (day - (SLEEP_DEBT_DAYS - 1)..=day).rev();
+        let actual = range
+            .clone()
+            .map(|d| asleep_by_day.get(&d).copied().unwrap_or(0))
+            .collect();
+        let need = range.map(|d| sleep_need_s(asleep_by_day, d)).collect();
+        (actual, need)
+    };
+
+    for day in first..=anchor {
+        let (actual, need) = window(day);
+        let debt = sleep_debt(&actual, &need, &SleepDebtConfig::default());
+        let total = asleep_by_day.get(&day).copied();
+        let need_s = sleep_need_s(asleep_by_day, day);
+        let valid_days = actual.iter().filter(|&&s| s > 0).count();
+        let (y, m, d) = civil(day);
+        days.push(json!({
+            "date": format!("{y:04}-{m:02}-{d:02}"),
+            "total_sleep_min": total.map(|s| (s as f64 / 60.0).round()),
+            "sleep_need_min": (need_s as f64 / 60.0).round(),
+            "shortfall_min": total.map(|s| ((need_s - s) as f64 / 60.0).round()),
+            "cumulative_debt_min": debt.valid.then(|| (debt.debt_s as f64 / 60.0).round()),
+            "valid_days": valid_days,
+        }));
+    }
+
+    let (actual, need) = window(anchor);
+    let valid_days = actual.iter().filter(|&&s| s > 0).count();
+    let debt = sleep_debt(&actual, &need, &SleepDebtConfig::default());
+    let debt_min = if debt.valid {
+        (debt.debt_s as f64 / 60.0).round()
+    } else {
+        0.0
+    };
+    let state = match debt_min {
+        d if d >= 540.0 => "high",
+        d if d >= 360.0 => "moderate",
+        d if d >= 180.0 => "low",
+        _ => "none",
+    };
+    let recent_shortfall_min = if debt.valid && debt.recent_shortfall_s != i32::MAX {
+        (debt.recent_shortfall_s as f64 / 60.0).round()
+    } else {
+        0.0
+    };
+    json!({
+        "debt_min": debt_min,
+        "recent_shortfall_min": recent_shortfall_min,
+        "valid": debt.valid,
+        "need_h": (sleep_need_s(asleep_by_day, anchor) as f64 / 3600.0 * 100.0).round() / 100.0,
+        "valid_days": valid_days,
+        "window_days": SLEEP_DEBT_DAYS,
+        "state": state,
+        "days": days,
+    })
+}
 fn hm(unix_s: f64, tz: impl Into<OffsetHours>) -> String {
     let tz = tz.into().0;
     let sod = (unix_s as i64 + offset_seconds(tz)).rem_euclid(86400);
@@ -1349,6 +1470,42 @@ fn downsample_codes(vals: &[i64], n: usize) -> Vec<i64> {
         .collect()
 }
 
+fn make_digest(hrv: &VitalStat, rhr: &VitalStat) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let hrv_pct = vital_delta_pct(hrv);
+    let rhr_delta = match (rhr.1, rhr.2) {
+        (Some(l), Some(b)) => Some(l - b),
+        _ => None,
+    };
+    if let Some(p) = hrv_pct {
+        parts.push(format!("HRV {}{:.0}%", if p >= 0.0 { "+" } else { "" }, p));
+    }
+    if let Some(d) = rhr_delta {
+        parts.push(format!(
+            "resting HR {}{:.0} bpm",
+            if d >= 0.0 { "+" } else { "" },
+            d
+        ));
+    }
+    let recovering = match (hrv_pct, rhr_delta) {
+        (Some(p), _) => p >= 0.0,
+        (None, Some(d)) => d <= 0.0,
+        (None, None) => false,
+    };
+    let mut s = parts.join(", ");
+    if !s.is_empty() {
+        s.push_str(if recovering {
+            ". Recovering well."
+        } else {
+            ". Recovery dipping, take it easy."
+        });
+    }
+    if s.is_empty() {
+        s = "Synced. Not enough history yet for trends.".into();
+    }
+    s
+}
+
 /// Assemble the full dashboard summary as a JSON value. The torch models are
 /// supplied by `runner` (Python subprocess on desktop, `.ptl` on-device).
 pub fn build_summary(
@@ -1786,6 +1943,16 @@ pub fn build_summary(
     };
 
     let mut nights_json = Vec::new();
+    let mut asleep_by_day: std::collections::BTreeMap<i64, i32> = Default::default();
+    let mut incomplete_sleep_days = std::collections::BTreeSet::new();
+    // Causal personal baselines for the sleep score's physiology component: for each
+    // main sleep (>= MIN_BASELINE_SLEEP_DS), only strictly preceding main-sleep nights
+    // (`end_unix <= start_unix`) in resolved chronological order may contribute. Naps
+    // and undated/ambiguous windows are excluded, and fewer than MIN_BASELINE_NIGHTS
+    // prior observations yields `None` so `score_night` explicitly renormalizes without
+    // self-inclusion or future-data leakage.
+    let mut prior_main_rhr: Vec<(f64, f64)> = Vec::new();
+    let mut prior_main_hrv: Vec<(f64, f64)> = Vec::new();
     for nt in &nights {
         let hyp = hyps.get(&(nt.start_ds, nt.captured_unix));
         let raw_stages: Vec<i64> = hyp
@@ -1824,7 +1991,7 @@ pub fn build_summary(
                 * 100.0
         });
         let in_bed_s = (nt.end_ds - nt.start_ds) as f64 / 10.0;
-        let (metrics, _asleep_s) = sleep_metrics(&full_stages, in_bed_s);
+        let (metrics, asleep_s) = sleep_metrics(&full_stages, in_bed_s);
         let autonomic =
             autonomic_by_stage(&nt.hrv_t, &nt.hr_t, &full_stages, nt.start_ds, nt.end_ds);
         let start_unix = unix_s_at(nt.start_ds, nt.captured_unix);
@@ -1845,6 +2012,13 @@ pub fn build_summary(
             ]),
             _ => None,
         };
+        if !complete_staging {
+            incomplete_sleep_days.insert((end_unix as i64 + offset_seconds(tz)).div_euclid(86_400));
+        }
+        if asleep_s > 0 {
+            let wake_day = (end_unix as i64 + offset_seconds(tz)).div_euclid(86_400);
+            *asleep_by_day.entry(wake_day).or_default() += asleep_s;
+        }
         let raw_lowest_hr = {
             let lowest = nt.hr.iter().cloned().fold(f64::INFINITY, f64::min);
             lowest.is_finite().then_some(lowest)
@@ -1856,6 +2030,27 @@ pub fn build_summary(
         // app shows); otherwise the median of the ring's own per-window values.
         let ecore_breath = ecore_breath_by_night.get(&(nt.start_ds, nt.captured_unix)).copied();
         let night_breath = ecore_breath.or_else(|| median_of(&nt.breath));
+        let is_main_sleep = (nt.end_ds - nt.start_ds) >= sleep_score::MIN_BASELINE_SLEEP_DS;
+        let rhr_baseline = if is_main_sleep {
+            let priors: Vec<f64> = prior_main_rhr
+                .iter()
+                .filter(|&&(prev_end, _)| prev_end <= start_unix)
+                .map(|&(_, v)| v)
+                .collect();
+            sleep_score::causal_baseline(&priors)
+        } else {
+            None
+        };
+        let hrv_baseline = if is_main_sleep {
+            let priors: Vec<f64> = prior_main_hrv
+                .iter()
+                .filter(|&&(prev_end, _)| prev_end <= start_unix)
+                .map(|&(_, v)| v)
+                .collect();
+            sleep_score::causal_baseline(&priors)
+        } else {
+            None
+        };
         // The official app's main hypnogram: the 30 s stages folded into 5-minute
         // blocks (Android `SleepPhaseConverter.aggregate30SecTo5Min`).
         let stages_5min = (!full_stages.is_empty())
@@ -1928,6 +2123,22 @@ pub fn build_summary(
             // Oura's SleepNet-BDI breathing disturbances (null without the model):
             // odi_pct = % of sleep epochs flagged, events_per_hour, status 1 = ok.
             "breathing": breathing_by_night.get(&(nt.start_ds, nt.captured_unix)),
+            // A score whose every threshold traces to a paper rather than to a fit
+            // against Oura's own number. See `sleep_score`.
+            "sleep_score": if complete_staging { sleep_score::score_night(sleep_score::NightInput {
+                asleep_min: (asleep_s > 0).then(|| asleep_s as f64 / 60.0),
+                efficiency_pct: hyp.and_then(|h| h["efficiency_pct"].as_f64()),
+                onset_latency_min: metrics["sol_min"].as_f64(),
+                waso_min: metrics["waso_min"].as_f64(),
+                awakenings: metrics["awakenings"].as_f64(),
+                deep_pct: deep_pct_val.as_f64(),
+                rem_pct: rem_pct_val.as_f64(),
+                rhr: night_rhr,
+                rhr_baseline,
+                hrv_ms: night_hrv,
+                hrv_baseline,
+                age: demo.age,
+            }) } else { Value::Null },
             "breath_rate": night_breath.map(|b| (b * 10.0).round() / 10.0),
             "breath_rate_source": if ecore_breath.is_some() { json!("ecore") }
                 else if night_breath.is_some() { json!("ring") } else { Value::Null },
@@ -1935,8 +2146,19 @@ pub fn build_summary(
         night_json["stages_5min"] = json!(stages_5min);
         night_json["stages_t0_unix"] = json!(stages_t0_unix);
         nights_json.push(night_json);
+        if is_main_sleep {
+            if let Some(lowest) = raw_lowest_hr {
+                prior_main_rhr.push((end_unix, lowest));
+            }
+            if let Some(hrv_mean) = raw_mean_hrv {
+                prior_main_hrv.push((end_unix, hrv_mean));
+            }
+        }
     }
     nights_json.reverse();
+
+    asleep_by_day.retain(|day, _| !incomplete_sleep_days.contains(day));
+    let sleep_debt = sleep_debt_summary(&asleep_by_day);
 
     let activity = activity_raw
         .as_ref()
@@ -2220,6 +2442,8 @@ pub fn build_summary(
         "insights": insights,
     });
 
+    let digest = make_digest(&hrv_stat, &rhr_stat);
+
     let mut clock_diag = clock.diagnostics();
     clock_diag["undated_nights"] = json!(undated_nights);
     let mut clock_warnings: Vec<String> = Vec::new();
@@ -2300,10 +2524,12 @@ pub fn build_summary(
     Ok(json!({
         "generated_at": now,
         "tz": tz,
+        "digest": digest,
         "clock": clock_diag,
         "device": device,
         "profile": demo.to_json(),
         "nights": nights_json,
+        "sleep_debt": sleep_debt,
         // Symptom Radar comes only from Oura's illness_detection model (the Python
         // runner here, IllnessModel.swift on iOS); there is no model-free fallback.
         "illness": illness,
@@ -2576,6 +2802,63 @@ mod tests {
         assert!(
             ring_hypnograms(&[run], &[night], |ds, cu| ds as f64 / 10.0 + cu as f64).is_empty()
         );
+    }
+
+    #[test]
+    fn sleep_debt_aggregates_sessions_and_uses_fourteen_calendar_days() {
+        let mut sleep = std::collections::BTreeMap::new();
+        for day in 100..105 {
+            sleep.insert(day, 7 * 3600);
+        }
+        // A one-hour nap belongs to the latest calendar day, making its total 8 h.
+        *sleep.entry(104).or_default() += 3600;
+        let value = sleep_debt_summary(&sleep);
+        assert_eq!(value["valid"], true);
+        assert_eq!(value["valid_days"], 5);
+        assert_eq!(value["days"].as_array().unwrap().len(), 14);
+        assert_eq!(value["days"][13]["total_sleep_min"], 480.0);
+        assert_eq!(value["recent_shortfall_min"], 0.0);
+    }
+
+    #[test]
+    fn sleep_need_defaults_until_enough_history_then_personalizes() {
+        let mut sleep = std::collections::BTreeMap::new();
+        for day in 100..113 {
+            sleep.insert(day, 27000); // 7.5 h × 13 days — one short of the minimum
+        }
+        assert_eq!(sleep_need_s(&sleep, 113), 28800); // still the 8 h default
+        sleep.insert(113, 27000); // 14th valid day
+        assert_eq!(sleep_need_s(&sleep, 114), 27000); // typical sleep becomes the need
+                                                      // causal: a day's own sleep is not part of its need window
+        assert_eq!(sleep_need_s(&sleep, 113), 28800);
+    }
+
+    #[test]
+    fn sleep_need_filters_outliers_and_clamps_to_healthy_band() {
+        let mut sleep = std::collections::BTreeMap::new();
+        for day in 100..120 {
+            sleep.insert(day, 27000); // 7.5 h typical
+        }
+        sleep.insert(120, 2 * 3600); // an unusually short night
+        sleep.insert(121, 13 * 3600); // and an unusually long one
+        assert_eq!(sleep_need_s(&sleep, 122), 27000); // both filtered out
+
+        let short: std::collections::BTreeMap<i64, i32> =
+            (100..120).map(|d| (d, 5 * 3600)).collect(); // chronic 5 h sleeper
+        assert_eq!(sleep_need_s(&short, 120), 7 * 3600); // clamped to the 7 h floor
+    }
+
+    #[test]
+    fn sleep_debt_requires_five_distinct_days_not_five_sessions() {
+        let sleep = std::collections::BTreeMap::from([
+            (100, 8 * 3600),
+            (101, 8 * 3600),
+            (102, 8 * 3600),
+            (103, 8 * 3600),
+        ]);
+        let value = sleep_debt_summary(&sleep);
+        assert_eq!(value["valid"], false);
+        assert_eq!(value["valid_days"], 4);
     }
 
     #[test]
@@ -2919,6 +3202,148 @@ mod tests {
         assert_eq!(undated.len(), 1);
         assert_eq!(undated[0]["reason"], "accelerated_counter");
         assert_eq!(undated[0]["recoverable"], false);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sleep_score_baselines_are_causal_exclude_naps_and_never_leak_future_nights() {
+        struct FakeRunner;
+        impl ModelRunner for FakeRunner {
+            fn run(&self, input: ModelInputs) -> ModelOutputs {
+                let arr: Vec<Value> = input
+                    .sleep_ranges
+                    .iter()
+                    .map(|&[s, e, cu]| {
+                        let epochs = ((e - s) / 300).max(1) as usize;
+                        // All light sleep (code 2) for deterministic staging
+                        json!({
+                            "start_ds": s,
+                            "end_ds": e,
+                            "captured_unix": cu,
+                            "stages": vec![2; epochs],
+                            "deep_pct": 20.0,
+                            "light_pct": 55.0,
+                            "rem_pct": 25.0,
+                            "wake_pct": 0.0,
+                            "efficiency_pct": 95.0,
+                            "source": "nssa",
+                        })
+                    })
+                    .collect();
+                ModelOutputs {
+                    sleep_batch: Some(Value::Array(arr)),
+                    ..Default::default()
+                }
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!("oura-sum-causal-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("causal.db");
+        let _ = std::fs::remove_file(&db);
+
+        {
+            let _ = Store::open(&db).unwrap();
+        }
+        let base_unix = 1_785_000_000_i64;
+        let day_ds = 864_000_i64;
+        let insert_session = |conn: &rusqlite::Connection,
+                              idx: i64,
+                              start_ds: i64,
+                              dur_ds: i64,
+                              hr: u8,
+                              rmssd: u8| {
+            let end_ds = start_ds + dur_ds;
+            let cap = base_unix + (idx + 1) * 86_400;
+            let mut bed_body = (start_ds as u32).to_le_bytes().to_vec();
+            bed_body.extend_from_slice(&(end_ds as u32).to_le_bytes());
+            conn.execute(
+                "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+                 VALUES ('S1', 93, 'hrv_event', ?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    start_ds + 3000,
+                    vec![hr, rmssd],
+                    format!("{{\"hr_bpm\":[{hr}],\"rmssd_ms\":[{rmssd}],\"interval_min\":5}}"),
+                    cap,
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+                 VALUES ('S1', 118, 'bedtime_period', ?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    end_ds,
+                    bed_body,
+                    format!(
+                        "{{\"bedtime_start_ds\":{start_ds},\"bedtime_end_ds\":{end_ds},\"duration_hours\":{}}}",
+                        dur_ds as f64 / 36_000.0
+                    ),
+                    cap,
+                ],
+            )
+            .unwrap();
+        };
+
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO events (serial, tag, name, ring_timestamp, body, decoded_json, captured_unix)
+             VALUES ('S1', 66, 'time_sync', 1000, X'00000000', ?1, ?2)",
+            rusqlite::params![format!("{{\"unix_time\":{base_unix}}}"), base_unix],
+        )
+        .unwrap();
+
+        // Main nights 0, 1, 2 (8h each) + a 90-minute nap before night 2 + Main night 3 (8h).
+        insert_session(&conn, 0, 10_000, 8 * 36_000, 50, 60);
+        insert_session(&conn, 1, 10_000 + day_ds, 8 * 36_000, 52, 58);
+        // Daytime nap (1.5h < 3h MIN_BASELINE_SLEEP_DS) with extreme HR=90, HRV=15: must be ignored by baseline!
+        insert_session(&conn, 1, 10_000 + day_ds + 12 * 36_000, 90 * 600, 90, 15);
+        insert_session(&conn, 2, 10_000 + 2 * day_ds, 8 * 36_000, 48, 62);
+        insert_session(&conn, 3, 10_000 + 3 * day_ds, 8 * 36_000, 54, 50);
+        drop(conn);
+
+        let sum_before = build_summary(&db, 0.0, &FakeRunner).unwrap();
+        // `nights` in summary JSON is newest-first:
+        // index 0 = Night 3 (4th main night, has 3 prior main nights -> physiology component present!)
+        // index 1 = Night 2 (3rd main night, has only 2 prior main nights because nap is excluded -> NO physiology component!)
+        let nights_before = sum_before["nights"].as_array().unwrap();
+        assert_eq!(nights_before.len(), 5);
+        let night3_before = &nights_before[0]["sleep_score"];
+        let night2_before = &nights_before[1]["sleep_score"];
+
+        let has_physiology = |score: &Value| {
+            score["components"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["key"] == "physiology")
+        };
+        assert!(
+            has_physiology(night3_before),
+            "4th main night has 3 prior main nights and must include physiology"
+        );
+        assert!(
+            !has_physiology(night2_before),
+            "3rd main night has only 2 prior main nights (nap excluded) and must omit physiology"
+        );
+
+        // Now append a future Night 4 with extreme RHR (99 bpm) and HRV (8 ms) and verify
+        // earlier nights' sleep scores and physiology components are 100% unchanged.
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        insert_session(&conn, 4, 10_000 + 4 * day_ds, 8 * 36_000, 99, 8);
+        drop(conn);
+
+        let sum_after = build_summary(&db, 0.0, &FakeRunner).unwrap();
+        let nights_after = sum_after["nights"].as_array().unwrap();
+        assert_eq!(nights_after.len(), 6);
+        // nights_after[1..] correspond to nights_before[0..]
+        for i in 0..nights_before.len() {
+            assert_eq!(
+                nights_after[i + 1]["sleep_score"],
+                nights_before[i]["sleep_score"],
+                "future night leaked into historical night at offset {i}"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

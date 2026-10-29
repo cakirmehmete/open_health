@@ -10,6 +10,7 @@ struct DayExport: Encodable {
         var night: NightRow
         var metrics: Metrics?
         var autonomic: Autonomic?
+        var sleep_debt: SleepDebtDay?
     }
     struct Metrics: Encodable {
         var asleep_min: Double; var sol_min: Double; var rem_latency_min: Double?
@@ -77,7 +78,8 @@ struct DayExport: Encodable {
                 if a.any { autonomic = Autonomic(a) }
             }
             sleep = SleepSection(night: n, metrics: metrics.map(Metrics.init),
-                          autonomic: autonomic)
+                          autonomic: autonomic,
+                          sleep_debt: s.sleepDebt?.days.first { $0.date == day })
         case .activity:
             activity = ActivitySection(daily: s.activity_daily[day],
                                 profile_met: s.activity_profile[day] ?? [],
